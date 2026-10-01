@@ -11,6 +11,7 @@ from langchain.agents.middleware import ModelRequest, SummarizationMiddleware, d
 from langchain_core.tools import tool
 from langgraph.types import interrupt
 
+from .. import unterlagen
 from ..llm import chat_model
 from ..pipeline import scout_und_bewerten
 from ..profile import load_profile, remember
@@ -25,7 +26,8 @@ teilzunehmen. Du erledigst nichts selbst, was ein Sub-Agent besser kann, sondern
 Sub-Agents / Werkzeuge:
 - ausschreibungen_suchen: Scout + Analyst – neue Ausschreibungen auf service.bund.de finden und bewerten
 - analyst_beauftragen: schnelle Vorbewertung anhand der Kurzinfo
-- recherche_beauftragen: Recherche-Agent mit Browser liest Bekanntmachung und Vergabeunterlagen
+- recherche_beauftragen: Recherche-Agent sichert Bekanntmachung + Vergabeunterlagen (inkl. OCR) und wertet sie aus
+- unterlagen_sichern / unterlagen_auflisten: Dokumente einer Ausschreibung herunterladen bzw. anzeigen
 - vollbewertung_beauftragen: Analyst bewertet die gesamte Ausschreibung (Go/No-Go) nach der Recherche
 - kalkulation_beauftragen: Kalkulations-Agent ermittelt Positionen, bepreist Produkte über den
   OrderCity-Großhandel und kalkuliert das Angebot mit Aufschlag. Auch für freie Preisanfragen ohne
@@ -113,6 +115,22 @@ def build_delegate(services: Services, checkpointer):
         return b.als_text()
 
     @tool
+    async def unterlagen_sichern(tender_id: int) -> str:
+        """Lädt Bekanntmachungs-PDFs und Vergabeunterlagen herunter, speichert sie in der Datenbank und
+        liest den Text aus (gescannte PDFs per OCR). Läuft auch automatisch bei recherche_beauftragen."""
+        t = await _tender(tender_id)
+        msg = await unterlagen.sichern(services, t)
+        docs = await db.list_documents(tender_id)
+        return f"{msg}\n{unterlagen.uebersicht(docs, unterlagen.tender_dir(services, tender_id))}"
+
+    @tool
+    async def unterlagen_auflisten(tender_id: int) -> str:
+        """Zeigt die gespeicherten Unterlagen einer Ausschreibung (Art, Seiten, OCR-Seiten)."""
+        await _tender(tender_id)
+        docs = await db.list_documents(tender_id)
+        return unterlagen.uebersicht(docs, unterlagen.tender_dir(services, tender_id))
+
+    @tool
     async def recherche_beauftragen(tender_id: int, auftrag: str) -> str:
         """Beauftragt den Recherche-Agent (Browser), Bekanntmachung und Vergabeunterlagen auszuwerten.
         'auftrag' beschreibt, worauf er achten soll. Dauert einige Minuten."""
@@ -189,6 +207,8 @@ def build_delegate(services: Services, checkpointer):
         ausschreibung_details,
         analyst_beauftragen,
         recherche_beauftragen,
+        unterlagen_sichern,
+        unterlagen_auflisten,
         vollbewertung_beauftragen,
         kalkulation_beauftragen,
         angebot_beauftragen,

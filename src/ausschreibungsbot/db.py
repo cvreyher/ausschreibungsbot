@@ -42,6 +42,24 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tender_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    path TEXT NOT NULL UNIQUE,
+    source_url TEXT,
+    kind TEXT NOT NULL DEFAULT 'unterlage',    -- 'bekanntmachung' | 'lv' | 'unterlage' | 'archiv'
+    sha256 TEXT NOT NULL,
+    size INTEGER,
+    pages INTEGER,
+    text TEXT,                                 -- extrahierter Text (PDF-Text oder OCR)
+    text_method TEXT,                          -- 'pdf-text' | 'ocr' | 'gemischt' | 'keiner'
+    ocr_pages INTEGER DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'neu',        -- 'neu' | 'text' | 'fehler'
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tender_id, sha256)
+);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -167,6 +185,36 @@ class DB:
     async def clear_all_pending(self, chat_id: int) -> None:
         await self.conn.execute("DELETE FROM pending WHERE chat_id = ?", (chat_id,))
         await self.conn.commit()
+
+    # --- Unterlagen (heruntergeladene Dokumente) ---
+
+    async def add_document(self, d: dict[str, Any]) -> int | None:
+        """Registriert eine Datei. None, wenn sie (gleicher Inhalt) für die Ausschreibung schon bekannt ist."""
+        cur = await self.conn.execute(
+            """INSERT OR IGNORE INTO documents (tender_id, filename, path, source_url, kind, sha256, size)
+               VALUES (:tender_id, :filename, :path, :source_url, :kind, :sha256, :size)""",
+            d,
+        )
+        await self.conn.commit()
+        return cur.lastrowid if cur.rowcount else None
+
+    async def update_document(self, doc_id: int, **fields: Any) -> None:
+        cols = ", ".join(f"{k} = :{k}" for k in fields)
+        await self.conn.execute(f"UPDATE documents SET {cols} WHERE id = :id", {**fields, "id": doc_id})
+        await self.conn.commit()
+
+    async def list_documents(self, tender_id: int, with_text: bool = False) -> list[dict[str, Any]]:
+        cols = "*" if with_text else "id, tender_id, filename, path, source_url, kind, sha256, size, pages, text_method, ocr_pages, status, error, created_at, length(text) AS text_len"
+        cur = await self.conn.execute(
+            f"SELECT {cols} FROM documents WHERE tender_id = ? ORDER BY kind = 'bekanntmachung' DESC, kind = 'lv' DESC, filename",
+            (tender_id,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def document_by_path(self, path: str) -> dict[str, Any] | None:
+        cur = await self.conn.execute("SELECT * FROM documents WHERE path = ?", (path,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
 
     # --- Nutzer ---
 

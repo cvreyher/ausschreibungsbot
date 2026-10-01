@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from ..llm import chat_model
 from ..ordercity.client import OrderCityClient, OrderCitySettings
 from ..ordercity.kalkulation import als_markdown, eur, kalkuliere
+from .. import unterlagen
 from ..profile import load_profile
 from ..services import Services
 from .common import COMPANY, SECURITY_RULES, tender_brief, tool_errors
@@ -70,7 +71,8 @@ class Konfiguration(BaseModel):
 MENGEN_PROMPT = f"""Du bist der Mengen-Agent von {COMPANY}. Ermittle aus Recherchebericht und Leistungsverzeichnis (LV)
 ALLE Positionen, die Decocity liefern kann (Sonnen-, Blend-, Sichtschutz, Rollos, Plissees, Jalousien,
 Lamellenvorhänge, Markisen, Raffstores, Rollläden, Insektenschutz, Vorhänge).
-Lies dazu die LV-Dateien mit den Datei-Tools (downloads_auflisten, dokument_lesen). Übernimm Maße und Mengen
+Lies dazu die LV-Dateien mit den Datei-Tools (downloads_auflisten, dokument_lesen). Gescannte PDFs sind
+bereits per OCR in Text umgewandelt – dokument_lesen liefert diesen Text automatisch. Übernimm Maße und Mengen
 exakt aus dem LV. Fehlen Maße, lass sie leer und setze unsicher=true. Positionen anderer Gewerke ignorieren.
 {SECURITY_RULES}"""
 
@@ -142,9 +144,13 @@ async def kalkuliere_angebot(services: Services, tender: dict | None, auftrag: s
         if not tender:
             return "Keine Ausschreibung – Positionen bitte selbst aus dem Auftrag ableiten."
         recherche = folder / "recherche.md"
+        udir = unterlagen.tender_dir(services, tender["id"])
+        if not await services.db.list_documents(tender["id"]):
+            await unterlagen.sichern(services, tender)  # Unterlagen fehlen noch → jetzt sichern (inkl. OCR)
+        docs = await services.db.list_documents(tender["id"])
         agent = create_agent(
             chat_model(s, s.model_subagent),
-            tools=doc_tools(s.downloads_dir),
+            tools=doc_tools(udir),
             system_prompt=MENGEN_PROMPT,
             response_format=ToolStrategy(Positionsliste),
             middleware=[tool_errors(), ModelCallLimitMiddleware(run_limit=25, exit_behavior="end")],
@@ -152,6 +158,7 @@ async def kalkuliere_angebot(services: Services, tender: dict | None, auftrag: s
         task = (
             f"{tender_brief(tender)}\n\n# Recherchebericht\n"
             f"{recherche.read_text(encoding='utf-8') if recherche.exists() else '(keine Recherche vorhanden)'}"
+            f"\n\n# Unterlagen (LV zuerst lesen)\n{unterlagen.uebersicht(docs, udir)}"
             f"\n\n# Hinweise\n{hinweise}"
         )
         result = await agent.ainvoke({"messages": [HumanMessage(task)]}, {"recursion_limit": 150})

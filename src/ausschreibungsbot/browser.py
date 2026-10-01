@@ -24,6 +24,9 @@ class Browser(McpSession):
             "1280,900",
             "--image-responses",
             "omit",
+            # PDF-Funktion: Bekanntmachungen, die es nur als HTML gibt, als PDF sichern
+            "--caps",
+            "pdf",
         ]
         if settings.playwright_headless:
             args.append("--headless")

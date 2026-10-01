@@ -29,6 +29,7 @@ async def scheduler(services: Services) -> None:
 async def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("pypdf").setLevel(logging.ERROR)  # Warnungen zu CAD-Plänen u.ä.
 
     s = get_settings()
     db = DB(s.data_dir / "bot.sqlite")

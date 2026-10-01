@@ -6,7 +6,7 @@ import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -20,13 +20,14 @@ from pypdf import PdfReader
 from ..llm import chat_model
 from ..profile import load_profile
 from ..services import Services
+from .. import ocr, unterlagen
 from ..scout import HEADERS
+from ..unterlagen import EXTRAKT, download
 from .common import COMPANY, SECURITY_RULES, tender_brief, tool_errors
 
 MAX_CHARS = 30_000
 DOWNLOAD_WAIT_S = 60
 MAX_MODEL_CALLS = 45
-MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
 
 RECHERCHE_PROMPT = f"""Du bist der Recherche-Agent von {COMPANY}. Du bedienst einen Browser über Playwright-Tools.
 
@@ -35,6 +36,8 @@ Vergabeunterlagen herunter, sofern das ohne Anmeldung möglich ist. Lies die Dok
 den Datei-Tools. Arbeite zielgerichtet: Du hast ein Budget von etwa 30 Aktionen.
 
 Vorgehen (in dieser Reihenfolge, das spart Zeit und Geld):
+0. Die Bekanntmachung und erreichbare Unterlagen wurden bereits automatisch gesichert (Liste im Auftrag) –
+   gescannte PDFs sind per OCR lesbar. Lies diese zuerst mit dokument_lesen.
 1. seite_lesen(Bekanntmachungs-URL) – liefert Text und Links der Seite.
 2. Link zu den Vergabeunterlagen (oft Reiter "Vergabeunterlagen"/"Dokumente") ebenfalls mit seite_lesen öffnen.
 3. Gibt es "Alle Dokumente als ZIP" oder einzelne PDF-Links: datei_herunterladen(url).
@@ -74,29 +77,47 @@ Schreibe am Ende in die letzte Zeile entweder "ABGABE_ERFOLGREICH" oder "ABGABE_
 {SECURITY_RULES}"""
 
 
-def doc_tools(downloads: Path):
-    root = downloads.resolve()
+def doc_tools(*folders: Path):
+    """Datei-Tools über einen oder mehrere Ordner (z.B. Unterlagen der Ausschreibung + Browser-Downloads).
+    PDFs werden über den extrahierten Text gelesen – gescannte Seiten also per OCR."""
+    roots = [f.resolve() for f in folders]
 
     def _norm(name: str) -> str:
         return re.sub(r"[^a-z0-9]", "", name.lower())
 
     def _files() -> list[Path]:
-        files = [p for p in root.rglob("*") if p.is_file() and p.suffix != ".yml"]  # .yml = Browser-Snapshots
+        files = [
+            p for r in roots for p in r.rglob("*")
+            if p.is_file() and p.suffix != ".yml" and not p.name.endswith(EXTRAKT)  # .yml = Browser-Snapshots
+        ]
         return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
 
+    def _rel(p: Path) -> str:
+        for r in roots:
+            if p.is_relative_to(r):
+                return str(p.relative_to(r))
+        return p.name
+
     def _listing() -> str:
-        return "\n".join(f"{p.relative_to(root)} ({p.stat().st_size // 1024} KB)" for p in _files()[:100]) or "(leer)"
+        lines = []
+        for p in _files()[:150]:
+            info = f"{p.stat().st_size // 1024} KB"
+            if p.with_name(p.name + EXTRAKT).exists():
+                info += ", Text verfügbar"
+            lines.append(f"{_rel(p)} ({info})")
+        return "\n".join(lines) or "(leer)"
 
     def _find(name: str) -> Path:
         """Findet eine Datei auch bei leicht abweichendem Namen (Playwright ersetzt z.B. '_' durch '-')
         und wartet kurz, falls der Download noch läuft."""
         deadline = time.monotonic() + DOWNLOAD_WAIT_S
         while True:
-            p = (root / name).resolve()
-            if not p.is_relative_to(root):
-                raise ValueError("Pfad außerhalb des Download-Ordners")
-            if p.is_file():
-                return p
+            for r in roots:
+                p = (r / name).resolve()
+                if not p.is_relative_to(r):
+                    raise ValueError("Pfad außerhalb des Download-Ordners")
+                if p.is_file():
+                    return p
             target = _norm(Path(name).name)
             for f in _files():
                 if _norm(f.name) == target:
@@ -107,12 +128,12 @@ def doc_tools(downloads: Path):
 
     @tool
     def downloads_auflisten() -> str:
-        """Listet alle heruntergeladenen Dateien (neueste zuerst)."""
+        """Listet alle Unterlagen und Downloads (neueste zuerst)."""
         return _listing()
 
     @tool
     def zip_entpacken(dateiname: str) -> str:
-        """Entpackt eine ZIP-Datei aus dem Download-Ordner und listet den Inhalt."""
+        """Entpackt eine ZIP-Datei und listet den Inhalt."""
         src = _find(dateiname)
         target = src.with_suffix("")
         with zipfile.ZipFile(src) as z:
@@ -120,27 +141,38 @@ def doc_tools(downloads: Path):
                 if not (target / member).resolve().is_relative_to(target.resolve()):
                     return "Abgebrochen: ZIP enthält unsichere Pfade."
             z.extractall(target)
-        return "\n".join(str(p.relative_to(root)) for p in target.rglob("*") if p.is_file())
+        return "\n".join(_rel(p) for p in target.rglob("*") if p.is_file())
 
     @tool
     def dokument_lesen(dateiname: str, seite_von: int = 1, seite_bis: int = 30) -> str:
-        """Liest Text aus einer PDF- oder Textdatei im Download-Ordner (Seitenbereich bei PDFs)."""
+        """Liest den Text eines Dokuments (PDF inkl. OCR-Text gescannter Seiten, DOCX, GAEB, TXT).
+        Bei PDFs mit Seitenbereich."""
         p = _find(dateiname)
-        if p.suffix.lower() == ".pdf":
+        extrakt = p.with_name(p.name + EXTRAKT)
+        if extrakt.exists():
+            full = extrakt.read_text(encoding="utf-8")
+            pages = re.split(r"(?=^--- Seite \d+ ---$)", full, flags=re.M)
+            pages = [pg for pg in pages if pg.strip()]
+            if pages and pages[0].startswith("--- Seite"):
+                text = f"[{len(pages)} Seiten insgesamt]\n" + "".join(pages[max(seite_von - 1, 0) : seite_bis])
+            else:
+                text = full
+        elif p.suffix.lower() == ".pdf":
             reader = PdfReader(p)
             pages = reader.pages[max(seite_von - 1, 0) : seite_bis]
             text = "\n".join(f"--- Seite {i} ---\n{pg.extract_text() or ''}" for i, pg in enumerate(pages, seite_von))
             text = f"[{len(reader.pages)} Seiten insgesamt]\n{text}"
         else:
-            text = p.read_text(encoding="utf-8", errors="replace")
+            text = ocr.other_text(p)
+            if text is None:
+                return f"{p.name}: Dateityp wird nicht als Text unterstützt."
         return text[:MAX_CHARS] + ("\n[... gekürzt]" if len(text) > MAX_CHARS else "")
 
     return [downloads_auflisten, zip_entpacken, dokument_lesen]
 
 
-def web_tools(downloads: Path):
+def web_tools(target: Path):
     """Leichte Alternativen zum Browser: Seite als Text lesen und Dateien direkt herunterladen."""
-    root = downloads.resolve()
 
     @tool
     async def seite_lesen(url: str) -> str:
@@ -158,42 +190,27 @@ def web_tools(downloads: Path):
             href = urljoin(str(r.url), a["href"])
             if label and href.startswith("http") and (label, href) not in links:
                 links.append((label[:80], href))
-        out = f"URL: {r.url}\n\n{text[:MAX_CHARS // 2]}\n\nLinks:\n" + "\n".join(f"- {l} → {h}" for l, h in links[:120])
-        return out
+        return f"URL: {r.url}\n\n{text[:MAX_CHARS // 2]}\n\nLinks:\n" + "\n".join(f"- {l} → {h}" for l, h in links[:120])
 
     @tool
     async def datei_herunterladen(url: str) -> str:
-        """Lädt eine Datei (PDF, ZIP, …) direkt in den Download-Ordner und gibt den gespeicherten Namen zurück."""
+        """Lädt eine Datei (PDF, ZIP, …) direkt in den Unterlagen-Ordner und gibt den gespeicherten Namen zurück."""
         async with httpx.AsyncClient(headers=HEADERS, timeout=180, follow_redirects=True) as client:
-            async with client.stream("GET", url) as r:
-                r.raise_for_status()
-                name = None
-                if cd := r.headers.get("content-disposition"):
-                    m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", cd)
-                    name = unquote(m.group(1)) if m else None
-                name = name or unquote(Path(urlparse(str(r.url)).path).name) or "download"
-                name = re.sub(r"[^\w.\- ]", "_", name).strip() or "download"
-                target = root / name
-                size = 0
-                with target.open("wb") as f:
-                    async for chunk in r.aiter_bytes():
-                        size += len(chunk)
-                        if size > MAX_DOWNLOAD_BYTES:
-                            raise ValueError("Datei größer als 300 MB – abgebrochen")
-                        f.write(chunk)
-        return f"Gespeichert als '{name}' ({size // 1024} KB)"
+            p = await download(client, url, target)
+        return f"Gespeichert als '{p.name}' ({p.stat().st_size // 1024} KB)"
 
     return [seite_lesen, datei_herunterladen]
 
 
-async def _run(services: Services, system_prompt: str, task: str, uploads: bool = False) -> str:
+async def _run(services: Services, system_prompt: str, task: str, folder: Path, uploads: bool = False) -> str:
     s = services.settings
-    blocked = {"browser_run_code_unsafe"} | (set() if uploads else {"browser_file_upload"})
+    # PDF-Druck macht unterlagen.py selbst (mit absoluten Pfaden) – der Agent würde sonst ins Arbeitsverzeichnis schreiben
+    blocked = {"browser_run_code_unsafe", "browser_pdf_save"} | (set() if uploads else {"browser_file_upload"})
     async with services.browser.lock:
         browser_tools = [t for t in await services.browser.tools() if t.name not in blocked]
         agent = create_agent(
             chat_model(s, s.model_subagent),
-            tools=[*browser_tools, *doc_tools(s.downloads_dir), *web_tools(s.downloads_dir)],
+            tools=[*browser_tools, *doc_tools(folder, s.downloads_dir), *web_tools(folder)],
             system_prompt=system_prompt,
             middleware=[
                 tool_errors(),
@@ -237,8 +254,27 @@ def _save(services: Services, tender_id: int, filename: str, title: str, text: s
 
 
 async def recherchiere(services: Services, tender: dict, auftrag: str) -> str:
-    task = f"{tender_brief(tender)}\n\nAuftrag vom Delegate-Agent:\n{auftrag}"
-    report = await _run(services, RECHERCHE_PROMPT, task)
+    folder = unterlagen.tender_dir(services, tender["id"])
+    seit = time.time()
+    # 1. Unterlagen deterministisch sichern (Bekanntmachungs-PDFs, Vergabeunterlagen, OCR) – ohne LLM
+    try:
+        gesichert = await unterlagen.sichern(services, tender)
+    except Exception as e:
+        gesichert = f"Automatisches Sichern fehlgeschlagen: {e}"
+    docs = await services.db.list_documents(tender["id"])
+    task = (
+        f"{tender_brief(tender)}\n\n# Bereits automatisch gesicherte Unterlagen\n{gesichert}\n"
+        f"{unterlagen.uebersicht(docs, folder)}\n\n"
+        "Lies diese zuerst mit dokument_lesen. Lade nur nach, was fehlt.\n\n"
+        f"Auftrag vom Delegate-Agent:\n{auftrag}"
+    )
+    # 2. Agent recherchiert und liest
+    report = await _run(services, RECHERCHE_PROMPT, task, folder)
+    # 3. Was der Agent per Browser geladen hat, ebenfalls übernehmen und registrieren
+    unterlagen.uebernehmen(services, tender, seit)
+    await unterlagen.registrieren(services, tender)
+    docs = await services.db.list_documents(tender["id"])
+    report += f"\n\n### Gesicherte Unterlagen ({len(docs)})\n{unterlagen.uebersicht(docs, folder)}"
     path = _save(services, tender["id"], "recherche.md", "Recherche", report)
     return f"{report}\n\n(Gespeichert unter {path})"
 
@@ -250,6 +286,6 @@ async def gib_ab(services: Services, tender: dict, angebot: str) -> str:
         f"{tender_brief(tender)}\n\nFirmenprofil:\n{load_profile(services.settings)}\n\n"
         f"Freigegebenes Angebot:\n{angebot}\n\nVerfügbare Dateien:\n{files}"
     )
-    report = await _run(services, ABGABE_PROMPT, task, uploads=True)
+    report = await _run(services, ABGABE_PROMPT, task, unterlagen.tender_dir(services, tender["id"]), uploads=True)
     _save(services, tender["id"], "abgabe.md", "Abgabeversuch", report)
     return report

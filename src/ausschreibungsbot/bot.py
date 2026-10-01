@@ -26,6 +26,9 @@ from aiogram.types import (
 )
 from langgraph.types import Command as Resume
 
+from pathlib import Path
+
+from . import unterlagen
 from .agents.common import tender_brief
 from .pipeline import scout_und_bewerten
 from .profile import load_profile
@@ -38,6 +41,7 @@ TG_LIMIT = 4000
 BOT_COMMANDS = [
     BotCommand(command="suchen", description="Jetzt nach neuen Ausschreibungen suchen"),
     BotCommand(command="liste", description="Bekannte Ausschreibungen anzeigen"),
+    BotCommand(command="unterlagen", description="Unterlagen einer Ausschreibung: /unterlagen <Nr>"),
     BotCommand(command="profil", description="Firmenprofil anzeigen"),
     BotCommand(command="neu", description="Neues Gespräch beginnen"),
     BotCommand(command="hilfe", description="Hilfe"),
@@ -50,7 +54,7 @@ HELP = (
     "und schreibe einen Angebotsentwurf.\n"
     "• Abgegeben wird erst nach deiner Freigabe per Button.\n\n"
     "Du kannst mir auch einfach schreiben, z.B. „Such mal nach Markisen in Potsdam“.\n\n"
-    "/suchen /liste /profil /neu"
+    "/suchen /liste /unterlagen <Nr> /profil /neu"
 )
 
 
@@ -355,6 +359,31 @@ class TelegramUI:
                 return
             lines = [f"#{t['id']} [{t['status']}] {t['title']} – Frist {t['deadline']}" for t in rows]
             await self.send(m.chat.id, "\n".join(lines))
+
+        @r.message(Command("unterlagen"))
+        async def unterlagen_cmd(m: Message, command: CommandObject):
+            if not await self.allowed(m.chat.id):
+                return
+            arg = (command.args or "").strip().lstrip("#")
+            if not arg.isdigit() or not (t := await self.db.get_tender(int(arg))):
+                await m.answer("Nutzung: /unterlagen <Nr>  (Nummern siehe /liste)")
+                return
+            docs = await self.db.list_documents(t["id"])
+            if not docs:
+                await m.answer(f"Für #{t['id']} sind noch keine Unterlagen gesichert. Starte „📝 Bewerbung vorbereiten“ "
+                               "oder schreib mir „Sichere die Unterlagen für #" + str(t["id"]) + "“.")
+                return
+            root = unterlagen.tender_dir(self.services, t["id"])
+            ocr_pages = sum(d["ocr_pages"] or 0 for d in docs)
+            await self.send(
+                m.chat.id,
+                f"📂 #{t['id']} {t['title']}\n{len(docs)} Unterlagen, {ocr_pages} Seiten per OCR gelesen:\n\n"
+                + unterlagen.uebersicht(docs, root),
+            )
+            for d in docs:
+                path = Path(d["path"])
+                if d["kind"] == "bekanntmachung" and path.exists() and d["size"] < 45 * 1024 * 1024:
+                    await self.bot.send_document(m.chat.id, FSInputFile(path, filename=d["filename"]))
 
         @r.message(Command("profil"))
         async def profil(m: Message):

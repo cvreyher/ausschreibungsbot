@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     model_kalkulation: str = "deepseek/deepseek-v4.1-flash"
     kalkulation_reasoning_effort: str = "medium"
 
+    # OCR für gescannte PDF-Seiten (Vision-Modell über OpenRouter). Leer = kein OCR.
+    model_ocr: str = "google/gemini-2.5-flash-lite"
+    # Max. OCR-Seiten pro Ausschreibung und Lauf (Kostenschutz)
+    ocr_max_seiten: int = 150
+    # Seiten mit weniger eingebettetem Text gelten als Scan und werden per OCR gelesen
+    ocr_min_zeichen_pro_seite: int = 80
+
     # OrderCity-Großhandel (Produkte konfigurieren und bepreisen)
     ordercity_api_key: str = ""
     ordercity_base_url: str = "https://ordercity.vonreyher.media"
