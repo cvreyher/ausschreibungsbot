@@ -1,4 +1,22 @@
 import json
+import logging
+
+from langchain.agents.middleware import ToolCallRequest, ToolErrorMiddleware
+
+log = logging.getLogger(__name__)
+
+
+def _on_tool_error(exc: Exception, request: ToolCallRequest) -> str:
+    name = request.tool_call["name"]
+    log.warning("Tool %s fehlgeschlagen: %s: %s", name, type(exc).__name__, exc)
+    return f"Fehler in {name}: {type(exc).__name__}: {str(exc)[:500]}. Versuche einen anderen Weg."
+
+
+def tool_errors() -> ToolErrorMiddleware:
+    """Tool-Fehler gehen als Meldung an das Modell zurück, statt den ganzen Lauf abzubrechen.
+    Interrupts (Fragen an den Nutzer) laufen weiterhin normal durch."""
+    return ToolErrorMiddleware(_on_tool_error)
+
 
 COMPANY = "Decocity Sonnenschutz GmbH & Co. KG"
 

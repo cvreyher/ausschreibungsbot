@@ -16,7 +16,7 @@ from ..pipeline import scout_und_bewerten
 from ..profile import load_profile, remember
 from ..services import Services
 from . import analyst, angebot, recherche
-from .common import COMPANY, SECURITY_RULES, tender_brief
+from .common import COMPANY, SECURITY_RULES, tender_brief, tool_errors
 
 PROMPT = f"""Du bist der Ausschreibungs-Bot von {COMPANY} (Berlin) und arbeitest als Delegate-Agent.
 Du sprichst per Telegram mit dem Team von Decocity und hilfst ihnen, an öffentlichen Ausschreibungen
@@ -183,6 +183,7 @@ def build_delegate(services: Services, checkpointer):
         chat_model(s, s.model_delegate),
         tools=tools,
         middleware=[
+            tool_errors(),
             prompt,
             SummarizationMiddleware(chat_model(s, s.model_fast), trigger=("tokens", 80_000), keep=("messages", 20)),
         ],

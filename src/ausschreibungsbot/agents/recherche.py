@@ -1,6 +1,8 @@
 """Sub-Agent "Recherche": steuert per Playwright MCP den Browser auf der Vergabeplattform,
 liest Bekanntmachung und Vergabeunterlagen und erstellt einen strukturierten Bericht."""
 
+import re
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -14,9 +16,10 @@ from pypdf import PdfReader
 from ..llm import chat_model
 from ..profile import load_profile
 from ..services import Services
-from .common import COMPANY, SECURITY_RULES, tender_brief
+from .common import COMPANY, SECURITY_RULES, tender_brief, tool_errors
 
 MAX_CHARS = 30_000
+DOWNLOAD_WAIT_S = 60
 
 RECHERCHE_PROMPT = f"""Du bist der Recherche-Agent von {COMPANY}. Du bedienst einen Browser über Playwright-Tools.
 
@@ -36,7 +39,8 @@ Liefere am Ende einen Bericht auf Deutsch mit genau diesen Abschnitten:
 Bedienung:
 - Nach browser_navigate oder browser_click IMMER browser_snapshot aufrufen, um den Seiteninhalt zu sehen.
 - Auf Vergabeplattformen gibt es meist Reiter wie "Verfahrensangaben" und "Vergabeunterlagen".
-- Heruntergeladene Dateien findest du mit downloads_auflisten.
+- Downloads laufen im Hintergrund weiter. Prüfe danach mit downloads_auflisten, unter welchem
+  Namen die Datei gespeichert wurde (er kann vom angezeigten Namen abweichen), und nutze genau diesen.
 
 Regeln:
 - Melde dich NIRGENDS an, registriere dich nicht, gib keine Firmendaten in Formulare ein und
@@ -55,22 +59,43 @@ Schreibe am Ende in die letzte Zeile entweder "ABGABE_ERFOLGREICH" oder "ABGABE_
 def _doc_tools(downloads: Path):
     root = downloads.resolve()
 
-    def _safe(name: str) -> Path:
-        p = (root / name).resolve()
-        if not p.is_relative_to(root):
-            raise ValueError("Pfad außerhalb des Download-Ordners")
-        return p
+    def _norm(name: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", name.lower())
+
+    def _files() -> list[Path]:
+        files = [p for p in root.rglob("*") if p.is_file() and p.suffix != ".yml"]  # .yml = Browser-Snapshots
+        return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def _listing() -> str:
+        return "\n".join(f"{p.relative_to(root)} ({p.stat().st_size // 1024} KB)" for p in _files()[:100]) or "(leer)"
+
+    def _find(name: str) -> Path:
+        """Findet eine Datei auch bei leicht abweichendem Namen (Playwright ersetzt z.B. '_' durch '-')
+        und wartet kurz, falls der Download noch läuft."""
+        deadline = time.monotonic() + DOWNLOAD_WAIT_S
+        while True:
+            p = (root / name).resolve()
+            if not p.is_relative_to(root):
+                raise ValueError("Pfad außerhalb des Download-Ordners")
+            if p.is_file():
+                return p
+            target = _norm(Path(name).name)
+            for f in _files():
+                if _norm(f.name) == target:
+                    return f
+            if time.monotonic() > deadline:
+                raise FileNotFoundError(f"'{name}' nicht gefunden. Vorhandene Dateien:\n{_listing()}")
+            time.sleep(2)
 
     @tool
     def downloads_auflisten() -> str:
         """Listet alle heruntergeladenen Dateien (neueste zuerst)."""
-        files = sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: p.stat().st_mtime, reverse=True)
-        return "\n".join(f"{p.relative_to(root)} ({p.stat().st_size // 1024} KB)" for p in files[:100]) or "(leer)"
+        return _listing()
 
     @tool
     def zip_entpacken(dateiname: str) -> str:
         """Entpackt eine ZIP-Datei aus dem Download-Ordner und listet den Inhalt."""
-        src = _safe(dateiname)
+        src = _find(dateiname)
         target = src.with_suffix("")
         with zipfile.ZipFile(src) as z:
             for member in z.namelist():
@@ -82,7 +107,7 @@ def _doc_tools(downloads: Path):
     @tool
     def dokument_lesen(dateiname: str, seite_von: int = 1, seite_bis: int = 30) -> str:
         """Liest Text aus einer PDF- oder Textdatei im Download-Ordner (Seitenbereich bei PDFs)."""
-        p = _safe(dateiname)
+        p = _find(dateiname)
         if p.suffix.lower() == ".pdf":
             reader = PdfReader(p)
             pages = reader.pages[max(seite_von - 1, 0) : seite_bis]
@@ -105,6 +130,7 @@ async def _run(services: Services, system_prompt: str, task: str, uploads: bool 
             tools=[*browser_tools, *_doc_tools(s.downloads_dir)],
             system_prompt=system_prompt,
             middleware=[
+                tool_errors(),
                 # Browser-Snapshots sind groß: alte Tool-Ergebnisse aus dem Kontext räumen
                 ContextEditingMiddleware(edits=[ClearToolUsesEdit(trigger=60_000, keep=4)]),
                 ModelCallLimitMiddleware(run_limit=80, exit_behavior="end"),
