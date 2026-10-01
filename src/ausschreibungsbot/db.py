@@ -32,6 +32,16 @@ CREATE TABLE IF NOT EXISTS pending (
     message_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS users (
+    chat_id INTEGER PRIMARY KEY,
+    name TEXT,
+    username TEXT,
+    role TEXT NOT NULL DEFAULT 'user',        -- 'admin' | 'user'
+    status TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'approved' | 'blocked'
+    approved_by INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -133,6 +143,14 @@ class DB:
         row = await cur.fetchone()
         return dict(row) if row else None
 
+    async def home_chat(self, thread_id: str) -> int | None:
+        """Chat, in dem ein Thread ursprünglich läuft (erste Rückfrage, nicht die Admin-Kopien)."""
+        cur = await self.conn.execute(
+            "SELECT chat_id FROM pending WHERE thread_id = ? ORDER BY id LIMIT 1", (thread_id,)
+        )
+        row = await cur.fetchone()
+        return row["chat_id"] if row else None
+
     async def pending_by_id(self, pending_id: int) -> dict | None:
         cur = await self.conn.execute("SELECT * FROM pending WHERE id = ?", (pending_id,))
         row = await cur.fetchone()
@@ -149,6 +167,53 @@ class DB:
     async def clear_all_pending(self, chat_id: int) -> None:
         await self.conn.execute("DELETE FROM pending WHERE chat_id = ?", (chat_id,))
         await self.conn.commit()
+
+    # --- Nutzer ---
+
+    async def get_user(self, chat_id: int) -> dict | None:
+        cur = await self.conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def upsert_user(
+        self, chat_id: int, name: str | None, username: str | None, *, status: str | None = None, role: str | None = None
+    ) -> dict:
+        await self.conn.execute(
+            """INSERT INTO users (chat_id, name, username, status, role)
+               VALUES (:chat_id, :name, :username, COALESCE(:status, 'pending'), COALESCE(:role, 'user'))
+               ON CONFLICT(chat_id) DO UPDATE SET
+                 name = COALESCE(excluded.name, users.name),
+                 username = COALESCE(excluded.username, users.username),
+                 status = COALESCE(:status, users.status),
+                 role = COALESCE(:role, users.role),
+                 updated_at = datetime('now')""",
+            {"chat_id": chat_id, "name": name, "username": username, "status": status, "role": role},
+        )
+        await self.conn.commit()
+        return await self.get_user(chat_id)
+
+    async def set_user(self, chat_id: int, *, approved_by: int | None = None, **fields: str) -> dict | None:
+        if not await self.get_user(chat_id):
+            await self.upsert_user(chat_id, None, None)
+        cols = ", ".join(f"{k} = :{k}" for k in fields)
+        await self.conn.execute(
+            f"UPDATE users SET {cols}, approved_by = COALESCE(:approved_by, approved_by), "
+            "updated_at = datetime('now') WHERE chat_id = :chat_id",
+            {**fields, "approved_by": approved_by, "chat_id": chat_id},
+        )
+        await self.conn.commit()
+        return await self.get_user(chat_id)
+
+    async def list_users(self, status: str | None = None, role: str | None = None) -> list[dict]:
+        query, args = "SELECT * FROM users WHERE 1=1", []
+        if status:
+            query += " AND status = ?"
+            args.append(status)
+        if role:
+            query += " AND role = ?"
+            args.append(role)
+        cur = await self.conn.execute(query + " ORDER BY created_at", args)
+        return [dict(r) for r in await cur.fetchall()]
 
     # --- Key/Value ---
 

@@ -83,6 +83,23 @@ Dann in Telegram `/start` an den Bot schicken.
 Auf jeder gemeldeten Ausschreibung: **📝 Bewerbung vorbereiten**, **🔎 Details**, **🙈 Ignorieren**.
 Fragen des Bots einfach per „Antworten“ beantworten.
 
+## Nutzer freischalten
+
+Wer zuerst `/start` schickt, wird Admin (ebenso alle IDs in `TELEGRAM_ALLOWED_CHAT_IDS`).
+Neue Personen schicken dem Bot `/start` – alle Admins bekommen eine Anfrage mit
+**✅ Freigeben / ❌ Ablehnen**.
+
+| Befehl (nur Admins) | |
+|---|---|
+| `/nutzer` | alle Nutzer und offenen Anfragen mit Chat-ID |
+| `/freigeben <ID>` | Nutzer freischalten |
+| `/admin <ID>` | Nutzer zum Admin machen |
+| `/entziehen <ID>` | Zugriff entziehen |
+
+Freigeschaltete Nutzer bekommen die Ausschreibungs-Meldungen und können mit dem Bot arbeiten.
+**Angebote freigeben dürfen nur Admins** – arbeitet ein Nutzer an einer Bewerbung, geht die
+Freigabe-Anfrage zusätzlich an alle Admins.
+
 ## Dateien
 
 - `profile/decocity.md` – Firmenprofil (ergänzen: Referenzen, Zertifikate, Umsätze …)

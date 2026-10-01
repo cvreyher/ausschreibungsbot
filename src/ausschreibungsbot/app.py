@@ -40,6 +40,7 @@ async def run() -> None:
         delegate = build_delegate(services, checkpointer)
         bot = Bot(s.telegram_bot_token)
         ui = TelegramUI(services, delegate, bot)
+        await ui.init_users()
         services.notify_tenders = ui.notify_tenders
 
         dp = Dispatcher()

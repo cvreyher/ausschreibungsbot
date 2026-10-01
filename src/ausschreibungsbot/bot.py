@@ -15,7 +15,7 @@ from collections import defaultdict
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction, ParseMode
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
@@ -54,6 +54,16 @@ HELP = (
 )
 
 
+ADMIN_HELP = (
+    "Admin-Befehle:\n"
+    "/nutzer – alle Nutzer und offenen Anfragen\n"
+    "/freigeben <ID> – Nutzer freischalten\n"
+    "/admin <ID> – Nutzer zum Admin machen\n"
+    "/entziehen <ID> – Zugriff entziehen\n\n"
+    "Neue Personen schicken dem Bot einfach /start – du bekommst dann eine Anfrage mit Buttons."
+)
+
+
 def chunks(text: str, size: int = TG_LIMIT) -> list[str]:
     text = text or "(leer)"
     return [text[i : i + size] for i in range(0, len(text), size)]
@@ -73,15 +83,58 @@ class TelegramUI:
 
     # ------------------------------------------------------------------ Zugriff
 
+    async def init_users(self) -> None:
+        """Übernimmt Admins aus TELEGRAM_ALLOWED_CHAT_IDS und den alten Besitzer-Eintrag."""
+        admins = set(self.s.allowed_chat_ids)
+        if owner := await self.db.kv_get("owner_chat_id"):
+            admins.add(int(owner))
+        for chat_id in admins:
+            await self.db.upsert_user(chat_id, None, None, status="approved", role="admin")
+
     async def recipients(self) -> set[int]:
-        ids = set(self.s.allowed_chat_ids)
-        owner = await self.db.kv_get("owner_chat_id")
-        if owner:
-            ids.add(int(owner))
-        return ids
+        return {u["chat_id"] for u in await self.db.list_users(status="approved")}
+
+    async def admins(self) -> set[int]:
+        return {u["chat_id"] for u in await self.db.list_users(status="approved", role="admin")}
 
     async def allowed(self, chat_id: int) -> bool:
-        return chat_id in await self.recipients()
+        u = await self.db.get_user(chat_id)
+        return bool(u and u["status"] == "approved")
+
+    async def is_admin(self, chat_id: int) -> bool:
+        u = await self.db.get_user(chat_id)
+        return bool(u and u["status"] == "approved" and u["role"] == "admin")
+
+    @staticmethod
+    def user_label(u: dict) -> str:
+        name = u.get("name") or "?"
+        handle = f" (@{u['username']})" if u.get("username") else ""
+        return f"{name}{handle} – ID {u['chat_id']}"
+
+    async def request_access(self, m: Message) -> None:
+        user = await self.db.upsert_user(m.chat.id, m.from_user.full_name, m.from_user.username)
+        if user["status"] == "blocked":
+            await m.answer("⛔ Kein Zugriff.")
+            return
+        await m.answer("🔐 Zugriff angefragt. Ein Admin von Decocity muss dich freischalten.")
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Freigeben", callback_data=f"usr:ok:{m.chat.id}"),
+                    InlineKeyboardButton(text="❌ Ablehnen", callback_data=f"usr:no:{m.chat.id}"),
+                ]
+            ]
+        )
+        for admin in await self.admins():
+            await self.bot.send_message(admin, f"🙋 Zugriffsanfrage\n{self.user_label(user)}", reply_markup=kb)
+
+    async def approve(self, chat_id: int, by: int, role: str = "user") -> dict:
+        user = await self.db.set_user(chat_id, status="approved", role=role, approved_by=by)
+        try:
+            await self.bot.send_message(chat_id, "✅ Du wurdest freigeschaltet.\n\n" + HELP)
+        except Exception as e:
+            log.warning("Konnte %s nicht benachrichtigen: %s", chat_id, e)
+        return user
 
     # ------------------------------------------------------------------ Senden
 
@@ -176,10 +229,9 @@ class TelegramUI:
             await self.db.add_pending(chat_id, thread_id, intr.id, "frage", tender_id, msg.message_id)
             return
 
-        # Freigabe: Entwurf als Datei + Buttons
+        # Freigabe: Entwurf als Datei + Buttons. Freigeben dürfen nur Admins – arbeitet ein
+        # normaler Nutzer am Angebot, geht die Anfrage zusätzlich an alle Admins.
         entwurf = self.s.bids_dir / str(tender_id) / "angebot_entwurf.md"
-        if entwurf.exists():
-            await self.bot.send_document(chat_id, FSInputFile(entwurf, filename=f"angebot_{tender_id}.md"))
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -189,10 +241,15 @@ class TelegramUI:
                 ]
             ]
         )
-        msg = await self.bot.send_message(
-            chat_id, f"🧾 Freigabe nötig\n{header}{v['zusammenfassung']}"[:TG_LIMIT], reply_markup=kb
-        )
-        await self.db.add_pending(chat_id, thread_id, intr.id, "freigabe", tender_id, msg.message_id)
+        targets = [chat_id] + sorted((await self.admins()) - {chat_id})
+        for target in targets:
+            if entwurf.exists():
+                await self.bot.send_document(target, FSInputFile(entwurf, filename=f"angebot_{tender_id}.md"))
+            note = "" if await self.is_admin(target) else "\n\n(Freigeben kann nur ein Admin – die Anfrage ging auch an die Admins.)"
+            msg = await self.bot.send_message(
+                target, f"🧾 Freigabe nötig\n{header}{v['zusammenfassung']}"[: TG_LIMIT - 120] + note, reply_markup=kb
+            )
+            await self.db.add_pending(target, thread_id, intr.id, "freigabe", tender_id, msg.message_id)
 
     async def chat_thread(self, chat_id: int) -> str:
         n = await self.db.kv_get(f"chat_thread:{chat_id}") or "0"
@@ -205,13 +262,75 @@ class TelegramUI:
 
         @r.message(CommandStart())
         async def start(m: Message):
-            if not await self.recipients():
-                await self.db.kv_set("owner_chat_id", str(m.chat.id))
-                await m.answer(f"👋 Du bist jetzt als Besitzer eingetragen (Chat-ID {m.chat.id}).")
+            if not await self.admins():
+                await self.db.upsert_user(
+                    m.chat.id, m.from_user.full_name, m.from_user.username, status="approved", role="admin"
+                )
+                await m.answer(f"👋 Du bist jetzt Admin dieses Bots (Chat-ID {m.chat.id}).")
             if not await self.allowed(m.chat.id):
-                await m.answer(f"⛔ Kein Zugriff. Deine Chat-ID: {m.chat.id}")
+                await self.request_access(m)
                 return
-            await m.answer(HELP)
+            await m.answer(HELP + ("\n\n" + ADMIN_HELP if await self.is_admin(m.chat.id) else ""))
+
+        # --- Nutzerverwaltung (nur Admins) ---
+
+        async def _target(m: Message, command: CommandObject) -> int | None:
+            if not await self.is_admin(m.chat.id):
+                return None
+            if not command.args or not command.args.strip().lstrip("-").isdigit():
+                await m.answer(f"Nutzung: /{command.command} <Chat-ID>  (IDs siehe /nutzer)")
+                return None
+            return int(command.args.strip())
+
+        @r.message(Command("nutzer"))
+        async def nutzer(m: Message):
+            if not await self.is_admin(m.chat.id):
+                return
+            users = await self.db.list_users()
+            icons = {"approved": "✅", "pending": "⏳", "blocked": "⛔"}
+            lines = [
+                f"{icons.get(u['status'], '?')} {'👑 ' if u['role'] == 'admin' else ''}{self.user_label(u)}"
+                for u in users
+            ]
+            await self.send(m.chat.id, "Nutzer:\n" + ("\n".join(lines) or "(keine)") + "\n\n" + ADMIN_HELP)
+
+        @r.message(Command("freigeben"))
+        async def freigeben(m: Message, command: CommandObject):
+            if (cid := await _target(m, command)) is not None:
+                u = await self.approve(cid, by=m.chat.id)
+                await m.answer(f"✅ Freigeschaltet: {self.user_label(u)}")
+
+        @r.message(Command("admin"))
+        async def admin(m: Message, command: CommandObject):
+            if (cid := await _target(m, command)) is not None:
+                u = await self.approve(cid, by=m.chat.id, role="admin")
+                await m.answer(f"👑 Admin: {self.user_label(u)}")
+
+        @r.message(Command("entziehen"))
+        async def entziehen(m: Message, command: CommandObject):
+            if (cid := await _target(m, command)) is None:
+                return
+            if cid == m.chat.id:
+                await m.answer("Du kannst dir nicht selbst den Zugriff entziehen.")
+                return
+            u = await self.db.set_user(cid, status="blocked", role="user")
+            await self.db.clear_all_pending(cid)
+            await m.answer(f"⛔ Zugriff entzogen: {self.user_label(u)}")
+
+        @r.callback_query(F.data.startswith("usr:"))
+        async def user_action(c: CallbackQuery):
+            if not await self.is_admin(c.message.chat.id):
+                await c.answer("Nur Admins.")
+                return
+            _, action, cid = c.data.split(":")
+            if action == "ok":
+                u = await self.approve(int(cid), by=c.message.chat.id)
+                text = f"✅ Freigeschaltet: {self.user_label(u)}"
+            else:
+                u = await self.db.set_user(int(cid), status="blocked")
+                text = f"❌ Abgelehnt: {self.user_label(u)}"
+            await c.answer()
+            await c.message.edit_text(text)
 
         @r.message(Command("hilfe"))
         async def hilfe(m: Message):
@@ -253,6 +372,7 @@ class TelegramUI:
         @r.message(F.text)
         async def text(m: Message):
             if not await self.allowed(m.chat.id):
+                await m.answer("🔐 Du bist noch nicht freigeschaltet. Schick /start, um Zugriff anzufragen.")
                 return
             pending = None
             if m.reply_to_message:
@@ -301,6 +421,9 @@ class TelegramUI:
             if not pending or pending["thread_id"] != thread_id:
                 await c.answer("Diese Freigabe ist nicht mehr aktuell.")
                 return
+            if action == "ok" and not await self.is_admin(chat_id):
+                await c.answer("Nur Admins dürfen Angebote freigeben.", show_alert=True)
+                return
             await c.message.edit_reply_markup(reply_markup=None)
             tid = pending["tender_id"]
             if action == "edit":
@@ -313,4 +436,9 @@ class TelegramUI:
                 await self.db.update_tender(tid, status="freigegeben" if action == "ok" else "verworfen")
             await c.answer("Freigegeben" if action == "ok" else "Verworfen")
             value = "freigegeben" if action == "ok" else "verworfen"
-            self.start_run(chat_id, thread_id, Resume(resume={pending["interrupt_id"]: value}))
+            # Weiter im Chat, in dem die Bewerbung läuft – auch wenn ein Admin aus seinem Chat freigibt.
+            home = await self.db.home_chat(thread_id) or chat_id
+            if home != chat_id:
+                who = c.from_user.full_name
+                await self.bot.send_message(home, f"{'✅ Freigegeben' if action == 'ok' else '❌ Verworfen'} von {who}.")
+            self.start_run(home, thread_id, Resume(resume={pending["interrupt_id"]: value}))
