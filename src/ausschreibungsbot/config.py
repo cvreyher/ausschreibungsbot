@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     model_smart: str = "anthropic/claude-sonnet-5.5"
     model_fast: str = "anthropic/claude-haiku-4.5"
 
+    # TypeSafe AI – Jev als Entscheidungsmodell für den Analyst (leer = nur LLM)
+    typesafe_api_key: str = ""
+    model_jev: str = "jev-latest"
+
     # Suche auf service.bund.de
     search_terms: str = (
         "Blendschutz,Sichtschutz,Sonnenschutz,Jalousien,Rollo,Vorhänge,Markisen,"
@@ -40,6 +44,12 @@ class Settings(BaseSettings):
     playwright_headless: bool = True
     # Sicherheitsschalter: Ohne True gibt der Bot niemals selbst ein Angebot ab.
     allow_auto_submit: bool = False
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+        # Die .env des Projekts hat Vorrang vor Shell-Variablen – sonst greift z.B. ein
+        # TELEGRAM_BOT_TOKEN aus ~/.zshrc und der Bot läuft mit dem Token eines anderen Bots.
+        return init_settings, dotenv_settings, env_settings, file_secret_settings
 
     @property
     def allowed_chat_ids(self) -> set[int]:

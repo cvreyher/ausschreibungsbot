@@ -1,9 +1,12 @@
 """Sub-Agent "Analyst".
 
-- bewerte():        schnelle, günstige Vorbewertung anhand der Kurzinfo (Scout-Treffer)
-- vollbewertung():  Go/No-Go-Bewertung der gesamten Ausschreibung inkl. Vergabeunterlagen
+- bewerte():        schnelle Vorbewertung anhand der Kurzinfo (Scout-Treffer) – Jev oder LLM
+- vollbewertung():  Go/No-Go-Bewertung der gesamten Ausschreibung inkl. Vergabeunterlagen –
+                    Entscheidungen von Jev, Texte vom LLM
 """
 
+import asyncio
+import logging
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -12,7 +15,10 @@ from pydantic import BaseModel, Field
 from ..llm import chat_model
 from ..profile import load_profile
 from ..services import Services
+from . import jev
 from .common import COMPANY, SECURITY_RULES, tender_brief
+
+log = logging.getLogger(__name__)
 
 
 class Bewertung(BaseModel):
@@ -83,28 +89,67 @@ Fehlen Infos im Profil, ist das kein No-Go, sondern ein fehlender Nachweis.
 
 
 async def vollbewertung(services: Services, tender: dict) -> Vollbewertung:
+    """LLM liefert die Texte (Begründung, Nachweise, Risiken); Jev – falls aktiv – trifft parallel
+    die Entscheidungen (Go/No-Go, Gewinnchance, Aufwand, Passung) mit Wahrscheinlichkeiten."""
     s = services.settings
     folder = s.bids_dir / str(tender["id"])
-    recherche = folder / "recherche.md"
-    if not recherche.exists():
+    recherche_path = folder / "recherche.md"
+    if not recherche_path.exists():
         raise ValueError("Noch keine Recherche vorhanden – zuerst recherche_beauftragen.")
+    recherche = recherche_path.read_text(encoding="utf-8")
+    profil, brief = load_profile(s), tender_brief(tender)
+
     llm = chat_model(s, s.model_smart, temperature=0).with_structured_output(Vollbewertung, method="function_calling")
-    result: Vollbewertung = await llm.ainvoke(
+    llm_call = llm.ainvoke(
         [
-            SystemMessage(VOLL_PROMPT + "\n\nFirmenprofil:\n" + load_profile(s)),
-            HumanMessage(f"{tender_brief(tender)}\n\n# Recherchebericht\n{recherche.read_text(encoding='utf-8')}"),
+            SystemMessage(VOLL_PROMPT + "\n\nFirmenprofil:\n" + profil),
+            HumanMessage(f"{brief}\n\n# Recherchebericht\n{recherche}"),
         ]
     )
+    if jev.enabled(s):
+        result, j = await asyncio.gather(llm_call, jev.entscheidung(s, profil, brief, recherche), return_exceptions=True)
+        if isinstance(result, BaseException):
+            raise result
+        if isinstance(j, BaseException):
+            log.warning("Jev-Vollbewertung fehlgeschlagen, nutze nur LLM: %s", j)
+        else:
+            result = result.model_copy(
+                update={
+                    "empfehlung": j.empfehlung,
+                    "gewinnchance": j.gewinnchance,
+                    "aufwand": j.aufwand,
+                    "score": j.score,
+                    "begruendung": (
+                        f"[Jev] Empfehlung {j.empfehlung} ({j.empfehlung_conf:.0%} sicher), "
+                        f"Eignung erfüllt {j.eignung_erfuellt:.0%}, Frist schaffbar {j.frist_schaffbar:.0%}. "
+                        f"LLM-Einschätzung: {result.empfehlung}.\n\n{result.begruendung}"
+                    ),
+                }
+            )
+    else:
+        result = await llm_call
+
     (folder / "bewertung.md").write_text(result.als_text(), encoding="utf-8")
     return result
 
 
 async def bewerte(services: Services, tender: dict) -> Bewertung:
+    """Vorbewertung eines Scout-Treffers – mit Jev, falls konfiguriert, sonst mit dem schnellen LLM."""
     s = services.settings
+    profil, brief = load_profile(s), tender_brief(tender)
+    if jev.enabled(s):
+        try:
+            j = await jev.vorbewertung(s, profil, brief)
+            return Bewertung(
+                score=j.score,
+                passt=j.score >= 40 or j.kernleistung >= 0.5,
+                zusammenfassung=j.als_text(),
+                begruendung="",
+                relevante_leistungen=[],
+                risiken=[] if j.region_ok >= 0.5 else ["Erfüllungsort außerhalb des Einzugsgebiets"],
+            )
+        except Exception as e:
+            log.warning("Jev-Vorbewertung fehlgeschlagen, nutze LLM: %s", e)
+
     llm = chat_model(s, s.model_fast, temperature=0).with_structured_output(Bewertung, method="function_calling")
-    return await llm.ainvoke(
-        [
-            SystemMessage(PROMPT + "\n\nFirmenprofil:\n" + load_profile(s)),
-            HumanMessage(tender_brief(tender)),
-        ]
-    )
+    return await llm.ainvoke([SystemMessage(PROMPT + "\n\nFirmenprofil:\n" + profil), HumanMessage(brief)])

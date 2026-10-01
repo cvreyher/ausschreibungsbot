@@ -27,6 +27,11 @@ Angebotsentwürfe schreibt. Abgegeben wird nur nach Freigabe per Button.
 - **Scout** – fragt die RSS-Feeds von service.bund.de ab (alle `POLL_INTERVAL_MINUTES`).
 - **Analyst** – Vorbewertung jedes neuen Treffers (schnelles Modell). Nach der Recherche folgt die
   Vollbewertung der gesamten Ausschreibung inkl. Unterlagen (Go/No-Go, Gewinnchance, Aufwand, Risiken).
+- **Jev (TypeSafe AI)** – wenn `TYPESAFE_API_KEY` gesetzt ist, trifft Jev die Entscheidungen des
+  Analysten: Vorbewertung (Passung, Kernleistung, Region, Leistungsart) und in der Vollbewertung
+  Go/No-Go, Gewinnchance, Aufwand, Eignung und Frist – jeweils mit Wahrscheinlichkeit. Ist Jev
+  unsicher (< 60 %), lautet die Empfehlung „prüfen“. Begründung, fehlende Nachweise und Risiken
+  schreibt parallel das LLM. Ohne Key oder bei Fehlern bewertet das LLM allein.
 - **Recherche-Agent** – öffnet die Bekanntmachung auf der Vergabeplattform, lädt Unterlagen herunter
   und liest sie. Meldet sich nie an und schickt nichts ab.
 - **Angebots-Agent** – Anschreiben, Konzept, Nachweis-Checkliste und Preisblatt (fehlende Preise
