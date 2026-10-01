@@ -99,7 +99,7 @@ async def vollbewertung(services: Services, tender: dict) -> Vollbewertung:
     recherche = recherche_path.read_text(encoding="utf-8")
     profil, brief = load_profile(s), tender_brief(tender)
 
-    llm = chat_model(s, s.model_smart, temperature=0).with_structured_output(Vollbewertung, method="function_calling")
+    llm = chat_model(s, s.model_subagent, temperature=0).with_structured_output(Vollbewertung, method="function_calling")
     llm_call = llm.ainvoke(
         [
             SystemMessage(VOLL_PROMPT + "\n\nFirmenprofil:\n" + profil),

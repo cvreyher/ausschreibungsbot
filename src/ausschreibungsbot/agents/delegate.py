@@ -180,7 +180,7 @@ def build_delegate(services: Services, checkpointer):
         abgabe_durchfuehren,
     ]
     return create_agent(
-        chat_model(s, s.model_delegate),
+        chat_model(s, s.model_delegate, reasoning_effort=s.delegate_reasoning_effort or None),
         tools=tools,
         middleware=[
             tool_errors(),

@@ -15,9 +15,14 @@ class Settings(BaseSettings):
     # OpenRouter
     openrouter_api_key: str
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    model_delegate: str = "anthropic/claude-sonnet-5.5"
-    model_smart: str = "anthropic/claude-sonnet-5.5"
-    model_fast: str = "anthropic/claude-haiku-4.5"
+    # Delegate-Agent: günstiges Reasoning-Modell
+    model_delegate: str = "inclusionai/ling-3.0-flash"
+    # low | medium | high – leer = Modell-Standard
+    delegate_reasoning_effort: str = "low"
+    # Sub-Agents (Recherche, Angebot, Vollbewertung)
+    model_subagent: str = "deepseek/deepseek-v4.1-flash"
+    # Vorbewertung und Zusammenfassungen
+    model_fast: str = "google/gemini-2.5-flash-lite"
 
     # TypeSafe AI – Jev als Entscheidungsmodell für den Analyst (leer = nur LLM)
     typesafe_api_key: str = ""

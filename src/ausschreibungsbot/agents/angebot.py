@@ -36,7 +36,7 @@ async def schreibe_entwurf(services: Services, tender: dict, hinweise: str) -> s
     if vorheriger:
         content += f"\n\n# Bisheriger Entwurf (überarbeiten, nicht neu erfinden)\n{vorheriger}"
 
-    llm = chat_model(s, s.model_smart, temperature=0.3)
+    llm = chat_model(s, s.model_subagent, temperature=0.3)
     msg = await llm.ainvoke([SystemMessage(PROMPT), HumanMessage(content)])
     entwurf_path.write_text(msg.text, encoding="utf-8")
     return msg.text

@@ -126,7 +126,7 @@ async def _run(services: Services, system_prompt: str, task: str, uploads: bool 
     async with services.browser.lock:
         browser_tools = [t for t in await services.browser.tools() if t.name not in blocked]
         agent = create_agent(
-            chat_model(s, s.model_smart),
+            chat_model(s, s.model_subagent),
             tools=[*browser_tools, *_doc_tools(s.downloads_dir)],
             system_prompt=system_prompt,
             middleware=[

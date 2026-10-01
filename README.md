@@ -6,6 +6,14 @@ Angebotsentwürfe schreibt. Abgegeben wird nur nach Freigabe per Button.
 
 **Stack:** Python 3.13 · uv · LangGraph/LangChain (Agents + Interrupts) · OpenRouter · Playwright MCP · aiogram
 
+**Modelle (über OpenRouter, in `.env` änderbar):**
+
+| Rolle | Modell | $/1 Mio. Tokens (Ein/Aus) |
+|---|---|---|
+| Delegate-Agent (`MODEL_DELEGATE`) | `inclusionai/ling-3.0-flash` (Reasoning) | 0,021 / 0,063 |
+| Sub-Agents: Recherche, Angebot, Vollbewertung (`MODEL_SUBAGENT`) | `deepseek/deepseek-v4.1-flash` | 0,03 / 0,50 |
+| Vorbewertung, Zusammenfassungen (`MODEL_FAST`) | `google/gemini-2.5-flash-lite` | 0,10 / 0,40 |
+
 ## Architektur
 
 ```
