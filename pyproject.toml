@@ -1,0 +1,29 @@
+[project]
+name = "ausschreibungsbot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "theDeal", email = "67086658+theDeal@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "aiogram>=3.31.0",
+    "aiosqlite>=0.22.1",
+    "beautifulsoup4>=4.15.0",
+    "httpx>=0.28.1",
+    "langchain>=1.4.3",
+    "langchain-mcp-adapters>=0.3.2",
+    "langchain-openai>=1.6.7",
+    "langgraph>=1.2.12",
+    "langgraph-checkpoint-sqlite>=3.1.1",
+    "pydantic-settings>=2.15.0",
+    "pypdf>=6.19.0",
+]
+
+[project.scripts]
+ausschreibungsbot = "ausschreibungsbot:main"
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"
