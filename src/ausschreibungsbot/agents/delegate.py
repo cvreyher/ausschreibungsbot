@@ -24,8 +24,9 @@ teilzunehmen. Du erledigst nichts selbst, was ein Sub-Agent besser kann, sondern
 
 Sub-Agents / Werkzeuge:
 - ausschreibungen_suchen: Scout + Analyst – neue Ausschreibungen auf service.bund.de finden und bewerten
-- analyst_beauftragen: eine Ausschreibung neu bewerten
+- analyst_beauftragen: schnelle Vorbewertung anhand der Kurzinfo
 - recherche_beauftragen: Recherche-Agent mit Browser liest Bekanntmachung und Vergabeunterlagen
+- vollbewertung_beauftragen: Analyst bewertet die gesamte Ausschreibung (Go/No-Go) nach der Recherche
 - angebot_beauftragen: Angebots-Agent schreibt/überarbeitet den Angebotsentwurf
 - frage_an_nutzer: dem Team eine Frage stellen und auf die Antwort warten
 - profil_merken: dauerhaft gültige Fakten über Decocity speichern (z.B. Referenzen, Stundensätze)
@@ -34,8 +35,11 @@ Sub-Agents / Werkzeuge:
 
 Ablauf "Bewerbung vorbereiten":
 1. recherche_beauftragen
-2. Offene Fragen aus der Recherche, die das Profil nicht beantwortet, GEBÜNDELT und nummeriert in
-   EINEM frage_an_nutzer-Aufruf stellen. Allgemeingültige Antworten mit profil_merken speichern.
+2. vollbewertung_beauftragen. Zeige dem Team das Ergebnis (Go/No-Go, Gewinnchance, Aufwand, Risiken)
+   und frage in EINEM frage_an_nutzer-Aufruf, ob weitergemacht werden soll – zusammen mit den
+   offenen Fragen aus Recherche und Bewertung, die das Profil nicht beantwortet (GEBÜNDELT, nummeriert).
+   Will das Team nicht weitermachen: kurz bestätigen und aufhören.
+   Allgemeingültige Antworten mit profil_merken speichern.
 3. angebot_beauftragen mit allen Antworten als Hinweise
 4. freigabe_anfordern mit kurzer Zusammenfassung
 5. Bei "aenderung": angebot_beauftragen mit dem Feedback, dann erneut freigabe_anfordern.
@@ -81,7 +85,7 @@ def build_delegate(services: Services, checkpointer):
         t = await _tender(tender_id)
         out = tender_brief(t)
         folder = s.bids_dir / str(tender_id)
-        for name in ("recherche.md", "angebot_entwurf.md"):
+        for name in ("bewertung.md", "recherche.md", "angebot_entwurf.md"):
             if (folder / name).exists():
                 out += f"\n\n=== {name} ===\n" + (folder / name).read_text(encoding="utf-8")[-8000:]
         return out
@@ -92,6 +96,14 @@ def build_delegate(services: Services, checkpointer):
         b = await analyst.bewerte(services, await _tender(tender_id))
         await db.update_tender(tender_id, score=b.score, summary=f"{b.zusammenfassung} {b.begruendung}")
         return b.model_dump_json(indent=1)
+
+    @tool
+    async def vollbewertung_beauftragen(tender_id: int) -> str:
+        """Lässt den Analyst-Agent die GESAMTE Ausschreibung (inkl. Recherche/Vergabeunterlagen)
+        bewerten: Go/No-Go, Gewinnchance, Aufwand, fehlende Nachweise, Risiken."""
+        b = await analyst.vollbewertung(services, await _tender(tender_id))
+        await db.update_tender(tender_id, score=b.score, summary=f"[{b.empfehlung}] {b.begruendung}")
+        return b.als_text()
 
     @tool
     async def recherche_beauftragen(tender_id: int, auftrag: str) -> str:
@@ -160,6 +172,7 @@ def build_delegate(services: Services, checkpointer):
         ausschreibung_details,
         analyst_beauftragen,
         recherche_beauftragen,
+        vollbewertung_beauftragen,
         angebot_beauftragen,
         frage_an_nutzer,
         profil_merken,
