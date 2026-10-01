@@ -13,6 +13,7 @@ Angebotsentwürfe schreibt. Abgegeben wird nur nach Freigabe per Button.
 | Delegate-Agent (`MODEL_DELEGATE`) | `inclusionai/ling-3.0-flash` (Reasoning) | 0,021 / 0,063 |
 | Sub-Agents: Recherche, Angebot, Vollbewertung (`MODEL_SUBAGENT`) | `deepseek/deepseek-v4.1-flash` | 0,03 / 0,50 |
 | Vorbewertung, Zusammenfassungen (`MODEL_FAST`) | `google/gemini-2.5-flash-lite` | 0,10 / 0,40 |
+| Kalkulations-Agent (`MODEL_KALKULATION`, Reasoning) | `deepseek/deepseek-v4.1-flash` | 0,03 / 0,50 |
 
 ## Architektur
 
@@ -52,6 +53,26 @@ Angebotsentwürfe schreibt. Abgegeben wird nur nach Freigabe per Button.
 - `ALLOW_AUTO_SUBMIT=false` (Standard): Der Bot gibt nie selbst ab, sondern bereitet alles vor
   (Status `bereit_zur_abgabe`).
 - Zugriff nur für freigegebene Chat-IDs (oder den ersten `/start`-Nutzer).
+
+## Kalkulation mit OrderCity
+
+```
+Kalkulations-Agent (Reasoning)
+ ├─ Mengen-Agent         liest Recherche + Leistungsverzeichnis → Positionen (Art, Maße, Menge)
+ ├─ Konfigurator-Agent   je Position: Produkt suchen, konfigurieren, berechnen  ──► OrderCity-MCP
+ └─ kalkulation_abschliessen   Aufschlag, Montage, USt, Summen (reiner Code)
+```
+
+- **OrderCity-MCP** (`uv run ordercity-mcp`, stdio): `hersteller_auflisten`, `kategorien`, `produkte_suchen`,
+  `produkt_konfigurator`, `stoffe_suchen`, `konfiguration_berechnen`, `angebot_kalkulieren`.
+  **Ohne Warenkorb/Bestellung** – über den Bot kann nichts gekauft werden. Lässt sich auch in
+  Claude Desktop o. ä. einbinden (`command: uv`, `args: ["run", "ordercity-mcp"]`, im Projektordner).
+- Gerechnet wird nur im Code. Jeder Preis wird nach dem Konfigurator-Agent nochmals direkt gegen
+  die API geprüft; das LLM gibt keine Beträge weiter.
+- Ergebnis in `data/bids/<id>/`: `kalkulation.md` (**intern**: Einkauf, Aufschlag, Rohertrag),
+  `kalkulation_angebot.md` (Preisblatt ohne interne Zahlen – nur das nutzt der Angebots-Agent),
+  `kalkulation.json`.
+- Freie Preisanfragen im Chat: „Was kosten 4 Plissees 80×120 mit Verdunkelung?“
 
 ## Einrichtung
 
@@ -112,7 +133,7 @@ Freigabe-Anfrage zusätzlich an alle Admins.
 
 - `profile/decocity.md` – Firmenprofil (ergänzen: Referenzen, Zertifikate, Umsätze …)
 - `profile/gelernt.md` – vom Bot gelernte Fakten
-- `data/bids/<id>/` – `recherche.md`, `bewertung.md`, `angebot_entwurf.md`
+- `data/bids/<id>/` – `recherche.md`, `bewertung.md`, `kalkulation*.md`, `angebot_entwurf.md`
 - `data/downloads/` – heruntergeladene Vergabeunterlagen
 - `data/*.sqlite` – Ausschreibungen und Gesprächszustände
 

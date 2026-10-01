@@ -6,6 +6,7 @@ from ..llm import chat_model
 from ..profile import load_profile
 from ..services import Services
 from .common import COMPANY, SECURITY_RULES, tender_brief
+from .kalkulation import kalkulation_fuer_angebot
 
 PROMPT = f"""Du bist der Angebots-Agent von {COMPANY}. Du erstellst Angebotsentwürfe für öffentliche
 Ausschreibungen in sauberem Markdown.
@@ -15,8 +16,11 @@ Aufbau des Entwurfs:
 2. Anschreiben an die Vergabestelle (förmlich, Sie-Form, im Namen von Decocity)
 3. Leistungsbeschreibung/Konzept: wie Decocity die Leistung erbringt (Aufmaß, Fertigung, Montage, Zeitplan, Gewährleistung)
 4. Checkliste geforderter Nachweise und Formulare: jeweils [x] vorhanden / [ ] fehlt
-5. Preisblatt: nur Positionen aus den Unterlagen; Preise NUR, wenn vom Nutzer genannt, sonst [PREIS FEHLT]
+5. Preisblatt: Positionen und Preise aus der beigefügten Kalkulation übernehmen (exakt, nicht runden
+   oder ändern). Positionen ohne Kalkulation und ohne Preis vom Nutzer: [PREIS FEHLT]
 6. Offene Punkte, die vor der Abgabe geklärt werden müssen
+
+Nenne im Angebot NIEMALS Einkaufspreise, Großhändler, Aufschläge oder Rohertrag.
 
 {SECURITY_RULES}"""
 
@@ -31,6 +35,7 @@ async def schreibe_entwurf(services: Services, tender: dict, hinweise: str) -> s
 
     content = (
         f"{tender_brief(tender)}\n\n# Firmenprofil\n{load_profile(s)}\n\n# Recherche\n{recherche}\n\n"
+        f"# Kalkulation (Preisblatt)\n{kalkulation_fuer_angebot(folder) or '(keine Kalkulation vorhanden)'}\n\n"
         f"# Hinweise und Antworten des Nutzers (vom Delegate-Agent)\n{hinweise}"
     )
     if vorheriger:

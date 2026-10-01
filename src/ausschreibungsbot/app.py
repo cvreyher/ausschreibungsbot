@@ -10,7 +10,7 @@ from .browser import Browser
 from .config import get_settings
 from .db import DB
 from .pipeline import scout_und_bewerten
-from .services import Services
+from .services import Services, ordercity_session
 
 log = logging.getLogger("ausschreibungsbot")
 
@@ -34,7 +34,7 @@ async def run() -> None:
     db = DB(s.data_dir / "bot.sqlite")
     await db.connect()
     browser = Browser(s)
-    services = Services(settings=s, db=db, browser=browser)
+    services = Services(settings=s, db=db, browser=browser, ordercity=ordercity_session(s))
 
     async with AsyncSqliteSaver.from_conn_string(str(s.data_dir / "checkpoints.sqlite")) as checkpointer:
         delegate = build_delegate(services, checkpointer)
@@ -54,5 +54,7 @@ async def run() -> None:
         finally:
             task.cancel()
             await browser.close()
+            if services.ordercity:
+                await services.ordercity.close()
             await bot.session.close()
             await db.close()

@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     # Vorbewertung und Zusammenfassungen
     model_fast: str = "google/gemini-2.5-flash-lite"
 
+    # Kalkulations-Agent (Reasoning) – seine Sub-Agents nutzen MODEL_SUBAGENT
+    model_kalkulation: str = "deepseek/deepseek-v4.1-flash"
+    kalkulation_reasoning_effort: str = "medium"
+
+    # OrderCity-Großhandel (Produkte konfigurieren und bepreisen)
+    ordercity_api_key: str = ""
+    ordercity_base_url: str = "https://ordercity.vonreyher.media"
+    # Aufschlag auf den OrderCity-Preis für Angebote (%)
+    angebot_aufschlag_prozent: float = 50.0
+    # Montage je Stück netto in EUR (0 = nicht einkalkuliert)
+    angebot_montage_pro_stueck_eur: float = 0.0
+
     # TypeSafe AI – Jev als Entscheidungsmodell für den Analyst (leer = nur LLM)
     typesafe_api_key: str = ""
     model_jev: str = "jev-latest"

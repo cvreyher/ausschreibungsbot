@@ -1,7 +1,7 @@
 [project]
 name = "ausschreibungsbot"
 version = "0.1.0"
-description = "Add your description here"
+description = "Ausschreibungs-Bot für Decocity (Telegram, LangGraph, OpenRouter, Playwright MCP, OrderCity MCP)"
 readme = "README.md"
 authors = [
     { name = "theDeal", email = "67086658+theDeal@users.noreply.github.com" }
@@ -25,6 +25,7 @@ dependencies = [
 
 [project.scripts]
 ausschreibungsbot = "ausschreibungsbot:main"
+ordercity-mcp = "ausschreibungsbot.ordercity.server:main"
 
 [build-system]
 requires = ["uv_build>=0.11.14,<0.12.0"]

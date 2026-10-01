@@ -6,26 +6,44 @@ import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urljoin, urlparse
+
+import httpx
+from bs4 import BeautifulSoup
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware, ModelCallLimitMiddleware
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from pypdf import PdfReader
 
 from ..llm import chat_model
 from ..profile import load_profile
 from ..services import Services
+from ..scout import HEADERS
 from .common import COMPANY, SECURITY_RULES, tender_brief, tool_errors
 
 MAX_CHARS = 30_000
 DOWNLOAD_WAIT_S = 60
+MAX_MODEL_CALLS = 45
+MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
 
 RECHERCHE_PROMPT = f"""Du bist der Recherche-Agent von {COMPANY}. Du bedienst einen Browser über Playwright-Tools.
 
 Deine Aufgabe: Öffne die Bekanntmachung auf der Vergabeplattform, lies sie vollständig und lade die
 Vergabeunterlagen herunter, sofern das ohne Anmeldung möglich ist. Lies die Dokumente (PDF/ZIP) mit
-den Datei-Tools. Arbeite gründlich, aber zielgerichtet.
+den Datei-Tools. Arbeite zielgerichtet: Du hast ein Budget von etwa 30 Aktionen.
+
+Vorgehen (in dieser Reihenfolge, das spart Zeit und Geld):
+1. seite_lesen(Bekanntmachungs-URL) – liefert Text und Links der Seite.
+2. Link zu den Vergabeunterlagen (oft Reiter "Vergabeunterlagen"/"Dokumente") ebenfalls mit seite_lesen öffnen.
+3. Gibt es "Alle Dokumente als ZIP" oder einzelne PDF-Links: datei_herunterladen(url).
+4. zip_entpacken, dann gezielt lesen: Aufforderung zur Angebotsabgabe, Bewerbungsbedingungen,
+   Leistungsverzeichnis/Leistungsbeschreibung (Sonnenschutz-Positionen!), Eignungsnachweise.
+5. Nur wenn seite_lesen keinen sinnvollen Inhalt liefert (JavaScript-Seite) oder Klicks nötig sind:
+   Browser-Tools verwenden.
+Wiederhole eine fehlgeschlagene Aktion höchstens zweimal – dann weiter mit dem Rest.
+Wenn du genug weißt, schreibe den Bericht. Lieber ein Bericht mit Lücken als gar keiner.
 
 Liefere am Ende einen Bericht auf Deutsch mit genau diesen Abschnitten:
 1. Leistungsgegenstand (was genau, Mengen, Lose – welches Los passt zu Decocity?)
@@ -36,7 +54,7 @@ Liefere am Ende einen Bericht auf Deutsch mit genau diesen Abschnitten:
 6. Heruntergeladene Dateien (Pfade)
 7. Offene Fragen an Decocity (Infos, die nur Decocity beantworten kann, z.B. Preise, Referenzen, Kapazität)
 
-Bedienung:
+Bedienung des Browsers (nur falls nötig):
 - Nach browser_navigate oder browser_click IMMER browser_snapshot aufrufen, um den Seiteninhalt zu sehen.
 - Auf Vergabeplattformen gibt es meist Reiter wie "Verfahrensangaben" und "Vergabeunterlagen".
 - Downloads laufen im Hintergrund weiter. Prüfe danach mit downloads_auflisten, unter welchem
@@ -56,7 +74,7 @@ Schreibe am Ende in die letzte Zeile entweder "ABGABE_ERFOLGREICH" oder "ABGABE_
 {SECURITY_RULES}"""
 
 
-def _doc_tools(downloads: Path):
+def doc_tools(downloads: Path):
     root = downloads.resolve()
 
     def _norm(name: str) -> str:
@@ -120,6 +138,54 @@ def _doc_tools(downloads: Path):
     return [downloads_auflisten, zip_entpacken, dokument_lesen]
 
 
+def web_tools(downloads: Path):
+    """Leichte Alternativen zum Browser: Seite als Text lesen und Dateien direkt herunterladen."""
+    root = downloads.resolve()
+
+    @tool
+    async def seite_lesen(url: str) -> str:
+        """Lädt eine Webseite und gibt ihren Text und ihre Links zurück (viel günstiger als der Browser)."""
+        async with httpx.AsyncClient(headers=HEADERS, timeout=45, follow_redirects=True) as client:
+            r = await client.get(url)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script", "style", "noscript", "svg"]):
+            tag.decompose()
+        text = re.sub(r"\n\s*\n+", "\n", soup.get_text("\n", strip=True))
+        links = []
+        for a in soup.select("a[href]"):
+            label = a.get_text(" ", strip=True) or a.get("title") or ""
+            href = urljoin(str(r.url), a["href"])
+            if label and href.startswith("http") and (label, href) not in links:
+                links.append((label[:80], href))
+        out = f"URL: {r.url}\n\n{text[:MAX_CHARS // 2]}\n\nLinks:\n" + "\n".join(f"- {l} → {h}" for l, h in links[:120])
+        return out
+
+    @tool
+    async def datei_herunterladen(url: str) -> str:
+        """Lädt eine Datei (PDF, ZIP, …) direkt in den Download-Ordner und gibt den gespeicherten Namen zurück."""
+        async with httpx.AsyncClient(headers=HEADERS, timeout=180, follow_redirects=True) as client:
+            async with client.stream("GET", url) as r:
+                r.raise_for_status()
+                name = None
+                if cd := r.headers.get("content-disposition"):
+                    m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", cd)
+                    name = unquote(m.group(1)) if m else None
+                name = name or unquote(Path(urlparse(str(r.url)).path).name) or "download"
+                name = re.sub(r"[^\w.\- ]", "_", name).strip() or "download"
+                target = root / name
+                size = 0
+                with target.open("wb") as f:
+                    async for chunk in r.aiter_bytes():
+                        size += len(chunk)
+                        if size > MAX_DOWNLOAD_BYTES:
+                            raise ValueError("Datei größer als 300 MB – abgebrochen")
+                        f.write(chunk)
+        return f"Gespeichert als '{name}' ({size // 1024} KB)"
+
+    return [seite_lesen, datei_herunterladen]
+
+
 async def _run(services: Services, system_prompt: str, task: str, uploads: bool = False) -> str:
     s = services.settings
     blocked = {"browser_run_code_unsafe"} | (set() if uploads else {"browser_file_upload"})
@@ -127,17 +193,38 @@ async def _run(services: Services, system_prompt: str, task: str, uploads: bool 
         browser_tools = [t for t in await services.browser.tools() if t.name not in blocked]
         agent = create_agent(
             chat_model(s, s.model_subagent),
-            tools=[*browser_tools, *_doc_tools(s.downloads_dir)],
+            tools=[*browser_tools, *doc_tools(s.downloads_dir), *web_tools(s.downloads_dir)],
             system_prompt=system_prompt,
             middleware=[
                 tool_errors(),
                 # Browser-Snapshots sind groß: alte Tool-Ergebnisse aus dem Kontext räumen
                 ContextEditingMiddleware(edits=[ClearToolUsesEdit(trigger=60_000, keep=4)]),
-                ModelCallLimitMiddleware(run_limit=80, exit_behavior="end"),
+                ModelCallLimitMiddleware(run_limit=MAX_MODEL_CALLS, exit_behavior="end"),
             ],
         )
-        result = await agent.ainvoke({"messages": [HumanMessage(task)]}, {"recursion_limit": 200})
-    return result["messages"][-1].text
+        result = await agent.ainvoke({"messages": [HumanMessage(task)]}, {"recursion_limit": 500})
+    return await _final_report(services, system_prompt, result["messages"])
+
+
+async def _final_report(services: Services, system_prompt: str, messages: list) -> str:
+    """Endet der Agent ohne Bericht (Budget erschöpft), wird aus dem Bisherigen ein Bericht erzwungen."""
+    last = messages[-1]
+    if isinstance(last, AIMessage) and not last.tool_calls and last.text.strip():
+        return last.text
+    if isinstance(last, AIMessage) and last.tool_calls:
+        messages = messages[:-1]  # Tool-Aufruf ohne Ergebnis würde die API ablehnen
+    s = services.settings
+    msg = await chat_model(s, s.model_subagent).ainvoke(
+        [
+            SystemMessage(system_prompt),
+            *messages,
+            HumanMessage(
+                "Dein Aktionsbudget ist aufgebraucht. Schreibe JETZT den Bericht mit allem, was du bisher "
+                "herausgefunden hast. Markiere fehlende Punkte deutlich als 'nicht ermittelt'."
+            ),
+        ]
+    )
+    return "⚠️ Aktionsbudget erschöpft – Bericht mit dem bisherigen Stand.\n\n" + msg.text
 
 
 def _save(services: Services, tender_id: int, filename: str, title: str, text: str) -> Path:

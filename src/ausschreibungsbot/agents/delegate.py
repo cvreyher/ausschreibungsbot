@@ -15,7 +15,7 @@ from ..llm import chat_model
 from ..pipeline import scout_und_bewerten
 from ..profile import load_profile, remember
 from ..services import Services
-from . import analyst, angebot, recherche
+from . import analyst, angebot, kalkulation, recherche
 from .common import COMPANY, SECURITY_RULES, tender_brief, tool_errors
 
 PROMPT = f"""Du bist der Ausschreibungs-Bot von {COMPANY} (Berlin) und arbeitest als Delegate-Agent.
@@ -27,6 +27,9 @@ Sub-Agents / Werkzeuge:
 - analyst_beauftragen: schnelle Vorbewertung anhand der Kurzinfo
 - recherche_beauftragen: Recherche-Agent mit Browser liest Bekanntmachung und Vergabeunterlagen
 - vollbewertung_beauftragen: Analyst bewertet die gesamte Ausschreibung (Go/No-Go) nach der Recherche
+- kalkulation_beauftragen: Kalkulations-Agent ermittelt Positionen, bepreist Produkte über den
+  OrderCity-Großhandel und kalkuliert das Angebot mit Aufschlag. Auch für freie Preisanfragen ohne
+  Ausschreibung (z.B. "Was kostet ein Plissee 80×120?") – dann ohne tender_id.
 - angebot_beauftragen: Angebots-Agent schreibt/überarbeitet den Angebotsentwurf
 - frage_an_nutzer: dem Team eine Frage stellen und auf die Antwort warten
 - profil_merken: dauerhaft gültige Fakten über Decocity speichern (z.B. Referenzen, Stundensätze)
@@ -40,10 +43,14 @@ Ablauf "Bewerbung vorbereiten":
    offenen Fragen aus Recherche und Bewertung, die das Profil nicht beantwortet (GEBÜNDELT, nummeriert).
    Will das Team nicht weitermachen: kurz bestätigen und aufhören.
    Allgemeingültige Antworten mit profil_merken speichern.
-3. angebot_beauftragen mit allen Antworten als Hinweise
-4. freigabe_anfordern mit kurzer Zusammenfassung
-5. Bei "aenderung": angebot_beauftragen mit dem Feedback, dann erneut freigabe_anfordern.
+3. kalkulation_beauftragen mit den Antworten als Auftrag (Preise aus dem Großhandel + Aufschlag)
+4. angebot_beauftragen mit allen Antworten als Hinweise – das Preisblatt kommt aus der Kalkulation
+5. freigabe_anfordern mit kurzer Zusammenfassung inkl. Angebotssumme netto
+6. Bei "aenderung": bei Preisänderungen erst kalkulation_beauftragen, dann angebot_beauftragen mit dem Feedback, dann erneut freigabe_anfordern.
    Bei "freigegeben": abgabe_durchfuehren. Bei "verworfen": kurz bestätigen und aufhören.
+
+Interne Zahlen (Einkaufspreise, Aufschlag, Rohertrag) nur dem Decocity-Team zeigen – niemals in
+Angebotsunterlagen für die Vergabestelle.
 
 Stil: Deutsch, kurz und klar, Telegram-tauglich (keine Tabellen, wenig Formatierung).
 Wenn du mit der Arbeit fertig bist, schreibe eine kurze Statusmeldung.
@@ -85,7 +92,7 @@ def build_delegate(services: Services, checkpointer):
         t = await _tender(tender_id)
         out = tender_brief(t)
         folder = s.bids_dir / str(tender_id)
-        for name in ("bewertung.md", "recherche.md", "angebot_entwurf.md"):
+        for name in ("bewertung.md", "kalkulation.md", "recherche.md", "angebot_entwurf.md"):
             if (folder / name).exists():
                 out += f"\n\n=== {name} ===\n" + (folder / name).read_text(encoding="utf-8")[-8000:]
         return out
@@ -113,6 +120,16 @@ def build_delegate(services: Services, checkpointer):
         if t["status"] in ("gemeldet", "neu"):
             await db.update_tender(tender_id, status="in_bearbeitung")
         return await recherche.recherchiere(services, t, auftrag)
+
+    @tool
+    async def kalkulation_beauftragen(auftrag: str, tender_id: int | None = None) -> str:
+        """Beauftragt den Kalkulations-Agent: Positionen ermitteln, Produkte im OrderCity-Großhandel
+        konfigurieren und bepreisen, Angebot mit Aufschlag kalkulieren. Ohne tender_id für freie
+        Preisanfragen – dann im Auftrag Produktart, Maße und Menge nennen. Dauert einige Minuten."""
+        if not services.ordercity:
+            return "OrderCity ist nicht konfiguriert (ORDERCITY_API_KEY fehlt in der .env)."
+        t = await _tender(tender_id) if tender_id else None
+        return await kalkulation.kalkuliere_angebot(services, t, auftrag)
 
     @tool
     async def angebot_beauftragen(tender_id: int, hinweise: str) -> str:
@@ -173,6 +190,7 @@ def build_delegate(services: Services, checkpointer):
         analyst_beauftragen,
         recherche_beauftragen,
         vollbewertung_beauftragen,
+        kalkulation_beauftragen,
         angebot_beauftragen,
         frage_an_nutzer,
         profil_merken,
