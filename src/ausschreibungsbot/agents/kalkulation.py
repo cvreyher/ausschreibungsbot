@@ -27,6 +27,7 @@ from .. import unterlagen
 from ..profile import load_profile
 from ..services import Services
 from .common import COMPANY, SECURITY_RULES, tender_brief, tool_errors
+from ..trace import melde
 from .recherche import doc_tools
 
 MAX_PARALLEL = 3
@@ -152,6 +153,7 @@ async def kalkuliere_angebot(services: Services, tender: dict | None, auftrag: s
             chat_model(s, s.model_subagent),
             tools=doc_tools(udir),
             system_prompt=MENGEN_PROMPT,
+            name="mengen",
             response_format=ToolStrategy(Positionsliste),
             middleware=[tool_errors(), ModelCallLimitMiddleware(run_limit=25, exit_behavior="end")],
         )
@@ -189,6 +191,7 @@ async def kalkuliere_angebot(services: Services, tender: dict | None, auftrag: s
                 chat_model(s, s.model_subagent),
                 tools=oc_tools,
                 system_prompt=KONFIG_PROMPT,
+                name="konfigurator",
                 response_format=ToolStrategy(Konfiguration),
                 middleware=[tool_errors(), ModelCallLimitMiddleware(run_limit=20, exit_behavior="end")],
             )
@@ -205,8 +208,10 @@ async def kalkuliere_angebot(services: Services, tender: dict | None, auftrag: s
         check = await api.berechne(k.hersteller, k.produkt_id, werte, 1)
         if not check["gueltig"]:
             probleme[nr] = f"Konfiguration ungültig: {check.get('fehler')}"
+            await melde(f"❌ Pos. {nr}: Preisprüfung abgelehnt – {check.get('fehler')}")
             return f"Position {nr}: {probleme[nr]}"
         ek = check["preis"]["vkNettoCents"]
+        await melde(f"✅ Pos. {nr}: {k.produkt_name or k.produkt_id} – Preis bei OrderCity geprüft ({eur(ek)}/Stk)")
         bepreist[nr] = {
             "nr": nr, "bezeichnung": f"{bezeichnung} ({k.produkt_name or k.produkt_id})", "menge": menge,
             "einkauf_netto_cents": ek, "hersteller": k.hersteller, "produkt_id": k.produkt_id, "werte": werte,
@@ -245,6 +250,7 @@ async def kalkuliere_angebot(services: Services, tender: dict | None, auftrag: s
         chat_model(s, s.model_kalkulation, reasoning_effort=s.kalkulation_reasoning_effort or None),
         tools=[positionen_ermitteln, position_bepreisen, kalkulation_abschliessen],
         system_prompt=KALK_PROMPT + "\n\nFirmenprofil:\n" + load_profile(s),
+        name="kalkulation",
         middleware=[tool_errors(), ModelCallLimitMiddleware(run_limit=40, exit_behavior="end")],
     )
     task = (f"{tender_brief(tender)}\n\n" if tender else "Freie Anfrage (keine Ausschreibung).\n\n") + f"Auftrag:\n{auftrag}"

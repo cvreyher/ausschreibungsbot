@@ -212,6 +212,7 @@ async def _run(services: Services, system_prompt: str, task: str, folder: Path, 
             chat_model(s, s.model_subagent),
             tools=[*browser_tools, *doc_tools(folder, s.downloads_dir), *web_tools(folder)],
             system_prompt=system_prompt,
+            name="abgabe" if uploads else "recherche",
             middleware=[
                 tool_errors(),
                 # Browser-Snapshots sind groß: alte Tool-Ergebnisse aus dem Kontext räumen

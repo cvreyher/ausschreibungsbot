@@ -2,7 +2,7 @@
 
 import logging
 
-from . import scout
+from . import scout, unterlagen
 from .agents.analyst import bewerte
 from .services import Services
 
@@ -37,4 +37,10 @@ async def scout_und_bewerten(services: Services, terms: list[str] | None = None,
     log.info("Scout: %d Treffer, %d neu, %d relevant", len(hits), len(new), len(relevant))
     if notify and relevant and services.notify_tenders:
         await services.notify_tenders(relevant)
+    if s.unterlagen_automatisch:
+        for t in relevant:
+            try:
+                log.info("Unterlagen für #%s: %s", t["id"], await unterlagen.sichern(services, t))
+            except Exception:
+                log.exception("Unterlagen für #%s konnten nicht gesichert werden", t["id"])
     return new

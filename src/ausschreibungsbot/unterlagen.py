@@ -9,6 +9,7 @@ import hashlib
 import logging
 import re
 import shutil
+import uuid
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -18,6 +19,7 @@ from bs4 import BeautifulSoup
 
 from . import ocr
 from .scout import HEADERS
+from .trace import melde
 from .services import Services
 
 log = logging.getLogger(__name__)
@@ -142,6 +144,7 @@ async def sichern(services: Services, tender: dict) -> str:
                     p = await download(client, href, target)
                     quellen[p.name] = href
                     log.info("Unterlage gesichert: %s", p.name)
+                    await melde(f"📥 {p.name} ({p.stat().st_size // 1024} KB)")
                 except Exception as e:
                     fehler.append(f"Download {href}: {e}")
             if depth == 0:
@@ -166,6 +169,7 @@ async def sichern(services: Services, tender: dict) -> str:
 async def bekanntmachung_drucken(services: Services, seiten: list[str], target: Path) -> None:
     """Viele Plattformen zeigen die Bekanntmachung nur als HTML. Dann druckt der Browser sie als PDF,
     damit immer eine Bekanntmachung in der Akte liegt."""
+    outdir = services.settings.downloads_dir.resolve()  # Playwright MCP darf nur hierhin schreiben
     async with services.browser.lock:
         tools = {t.name: t for t in await services.browser.tools()}
         if "browser_pdf_save" not in tools:
@@ -173,8 +177,13 @@ async def bekanntmachung_drucken(services: Services, seiten: list[str], target: 
         for i, url in enumerate(seiten, 1):
             await tools["browser_navigate"].ainvoke({"url": url})
             name = "Bekanntmachung.pdf" if i == 1 else f"Bekanntmachung_{i}.pdf"
-            await tools["browser_pdf_save"].ainvoke({"filename": str((target / name).resolve())})
+            tmp = outdir / f"druck-{uuid.uuid4().hex}.pdf"
+            result = str(await tools["browser_pdf_save"].ainvoke({"filename": str(tmp)}))
+            if "### Error" in result or not tmp.exists():
+                raise RuntimeError(result[:300])
+            shutil.move(tmp, target / name)
             log.info("Bekanntmachung als PDF gedruckt: %s ← %s", name, url)
+            await melde(f"🖨 {name} aus der Webseite erzeugt (kein PDF angeboten)")
 
 
 def uebernehmen(services: Services, tender: dict, seit: float) -> int:
@@ -221,6 +230,8 @@ async def registrieren(services: Services, tender: dict, quellen: dict[str, str]
         )
         if doc_id:
             neu += 1
+    if neu:
+        await melde(f"🗂 {neu} Unterlagen in der Datenbank registriert – lese Texte …")
 
     budget = ocr.OcrBudget(s.ocr_max_seiten)
     for d in await db.list_documents(tender["id"]):
@@ -233,6 +244,8 @@ async def registrieren(services: Services, tender: dict, quellen: dict[str, str]
             else:
                 text, pages, ocr_pages = ocr.other_text(path), None, 0
                 method = "datei" if text is not None else "keiner"
+            if ocr_pages:
+                await melde(f"🔤 OCR: {ocr_pages} gescannte Seite(n) aus {path.name} gelesen")
             if text and len(text) > MAX_TEXT_CHARS:
                 # z.B. CAD-Pläne mit Tausenden Mini-Beschriftungen – für Recherche und Kalkulation wertlos
                 text = text[:MAX_TEXT_CHARS] + f"\n[... gekürzt, Originaltext {len(text):,} Zeichen]"

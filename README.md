@@ -54,6 +54,38 @@ Angebotsentwürfe schreibt. Abgegeben wird nur nach Freigabe per Button.
   (Status `bereit_zur_abgabe`).
 - Zugriff nur für freigegebene Chat-IDs (oder den ersten `/start`-Nutzer).
 
+## Unterlagen, Datenbank & OCR
+
+Für jede relevante Ausschreibung (automatisch beim Scout-Lauf und vor jeder Recherche):
+
+1. **Herunterladen** – Bekanntmachungs-PDFs und Vergabeunterlagen von der Plattform. Gibt es „Alle
+   Dokumente als ZIP“, wird nur das geladen (statt jeder Datei einzeln).
+2. **Bekanntmachung als PDF** – bietet die Plattform keine an (nur HTML), druckt der Browser die
+   Bekanntmachungs- und Verfahrensseiten als `Bekanntmachung*.pdf`.
+3. **Entpacken & registrieren** – jede Datei steht in der Tabelle `documents` (Art, Quelle, SHA-256,
+   Seiten, Text). Doppelte Inhalte werden erkannt.
+4. **Text & OCR** – PDF-Text wird direkt gelesen; gescannte Seiten liest ein Vision-Modell
+   (`MODEL_OCR`). DOCX und GAEB-XML werden ebenfalls gelesen. Der Text liegt in der DB und als
+   `*.extrakt.txt` neben der Datei – Recherche- und Mengen-Agent lesen ihn über `dokument_lesen`.
+
+Ablage: `data/bids/<id>/unterlagen/`. Im Chat: `/unterlagen <Nr>` (Liste + Bekanntmachungs-PDFs).
+
+## Live-Protokoll im Chat
+
+Bei jedem Agent-Lauf erscheint eine Nachricht, die laufend ergänzt wird:
+
+```
+📜 #12 Med. Schule – Sonnenschutz
+0:02 🤖 Delegate → 🔎 Recherche: auftrag=Lose und Nachweise prüfen
+0:03    📥 Vergabeunterlagen_CXP9Y6EHX4E.zip (20454 KB)
+0:41    🖨 Bekanntmachung.pdf aus der Webseite erzeugt (kein PDF angeboten)
+0:55 🔎 Recherche → 🤖 Delegate: 1. Leistungsgegenstand: Los 3 Sonnenschutz …
+1:20 🧮 Kalkulation → 🛠 Konfigurator: Pos. 3.1 Innenrollo – 24× 1250×1800 mm
+1:31    ✅ Pos. 3.1: Rollo A50 – Preis bei OrderCity geprüft (272,00 €/Stk)
+```
+
+`/verlauf kurz` (Standard: Übergaben zwischen Agents) · `/verlauf voll` (+ jeder Tool-Aufruf) · `/verlauf aus`.
+
 ## Kalkulation mit OrderCity
 
 ```
@@ -105,6 +137,8 @@ Dann in Telegram `/start` an den Bot schicken.
 |---|---|
 | `/suchen` | sofort nach neuen Ausschreibungen suchen |
 | `/liste` | bekannte Ausschreibungen |
+| `/unterlagen <Nr>` | gesicherte Unterlagen + Bekanntmachungs-PDFs |
+| `/verlauf kurz\|voll\|aus` | Live-Protokoll der Agents |
 | `/profil` | Firmenprofil anzeigen |
 | `/neu` | neues Gespräch |
 | freier Text | z.B. „Such nach Markisen“, „Was ist mit #3?“ |

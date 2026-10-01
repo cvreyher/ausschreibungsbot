@@ -31,6 +31,7 @@ from pathlib import Path
 from . import unterlagen
 from .agents.common import tender_brief
 from .pipeline import scout_und_bewerten
+from .trace import MODES, LiveLog, TraceHandler
 from .profile import load_profile
 from .services import Services
 
@@ -42,6 +43,7 @@ BOT_COMMANDS = [
     BotCommand(command="suchen", description="Jetzt nach neuen Ausschreibungen suchen"),
     BotCommand(command="liste", description="Bekannte Ausschreibungen anzeigen"),
     BotCommand(command="unterlagen", description="Unterlagen einer Ausschreibung: /unterlagen <Nr>"),
+    BotCommand(command="verlauf", description="Agent-Protokoll: /verlauf kurz | voll | aus"),
     BotCommand(command="profil", description="Firmenprofil anzeigen"),
     BotCommand(command="neu", description="Neues Gespräch beginnen"),
     BotCommand(command="hilfe", description="Hilfe"),
@@ -54,7 +56,8 @@ HELP = (
     "und schreibe einen Angebotsentwurf.\n"
     "• Abgegeben wird erst nach deiner Freigabe per Button.\n\n"
     "Du kannst mir auch einfach schreiben, z.B. „Such mal nach Markisen in Potsdam“.\n\n"
-    "/suchen /liste /unterlagen <Nr> /profil /neu"
+    "Im Live-Protokoll siehst du, wie die Agents zusammenarbeiten (/verlauf kurz | voll | aus).\n\n"
+    "/suchen /liste /unterlagen <Nr> /verlauf /profil /neu"
 )
 
 
@@ -203,15 +206,26 @@ class TelegramUI:
 
             await self.db.clear_pending(thread_id)
             typing = asyncio.create_task(self._typing(chat_id))
+            live = None
+            mode = await self.db.kv_get(f"verlauf:{chat_id}") or "kurz"
+            if mode != "aus":
+                live = LiveLog(self.bot, chat_id, await self._thread_title(thread_id))
+                config["callbacks"] = [TraceHandler(live, mode)]
+            footer = "✅ fertig"
             try:
                 inp = payload if isinstance(payload, Resume) else {"messages": [{"role": "user", "content": payload}]}
                 await self.delegate.ainvoke(inp, config)
             except Exception as e:
+                footer = "❌ abgebrochen"
                 log.exception("Agent-Lauf %s fehlgeschlagen", thread_id)
                 await self.send(chat_id, f"⚠️ Fehler im Agent ({thread_id}): {e}")
                 return
             finally:
                 typing.cancel()
+                config.pop("callbacks", None)
+                if live:
+                    snap = await self.delegate.aget_state(config)
+                    await live.close("⏸ wartet auf eure Antwort" if snap.interrupts and footer.startswith("✅") else footer)
 
             snap = await self.delegate.aget_state(config)
             if snap.interrupts:
@@ -254,6 +268,11 @@ class TelegramUI:
                 target, f"🧾 Freigabe nötig\n{header}{v['zusammenfassung']}"[: TG_LIMIT - 120] + note, reply_markup=kb
             )
             await self.db.add_pending(target, thread_id, intr.id, "freigabe", tender_id, msg.message_id)
+
+    async def _thread_title(self, thread_id: str) -> str:
+        if thread_id.startswith("tender:") and (t := await self.db.get_tender(int(thread_id.split(":")[1]))):
+            return f"#{t['id']} {t['title'][:60]}"
+        return "Chat"
 
     async def chat_thread(self, chat_id: int) -> str:
         n = await self.db.kv_get(f"chat_thread:{chat_id}") or "0"
@@ -384,6 +403,21 @@ class TelegramUI:
                 path = Path(d["path"])
                 if d["kind"] == "bekanntmachung" and path.exists() and d["size"] < 45 * 1024 * 1024:
                     await self.bot.send_document(m.chat.id, FSInputFile(path, filename=d["filename"]))
+
+        @r.message(Command("verlauf"))
+        async def verlauf(m: Message, command: CommandObject):
+            if not await self.allowed(m.chat.id):
+                return
+            arg = (command.args or "").strip().lower()
+            if arg not in MODES:
+                aktuell = await self.db.kv_get(f"verlauf:{m.chat.id}") or "kurz"
+                await m.answer(
+                    f"Live-Protokoll: {aktuell}\n\n/verlauf kurz – Übergaben zwischen den Agents\n"
+                    "/verlauf voll – zusätzlich jeder Tool-Aufruf (Browser, Dokumente, OrderCity)\n/verlauf aus"
+                )
+                return
+            await self.db.kv_set(f"verlauf:{m.chat.id}", arg)
+            await m.answer(f"📜 Live-Protokoll: {arg}")
 
         @r.message(Command("profil"))
         async def profil(m: Message):

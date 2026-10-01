@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # Seiten mit weniger eingebettetem Text gelten als Scan und werden per OCR gelesen
     ocr_min_zeichen_pro_seite: int = 80
 
+    # Unterlagen relevanter Ausschreibungen schon beim Scout-Lauf sichern (Download + Text + OCR)
+    unterlagen_automatisch: bool = True
+
     # OrderCity-Großhandel (Produkte konfigurieren und bepreisen)
     ordercity_api_key: str = ""
     ordercity_base_url: str = "https://ordercity.vonreyher.media"
