@@ -1,2 +1,10 @@
+import asyncio
+
+
 def main() -> None:
-    print("Hello from ausschreibungsbot!")
+    from .app import run
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
