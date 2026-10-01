@@ -33,6 +33,11 @@ Liefere am Ende einen Bericht auf Deutsch mit genau diesen Abschnitten:
 6. Heruntergeladene Dateien (Pfade)
 7. Offene Fragen an Decocity (Infos, die nur Decocity beantworten kann, z.B. Preise, Referenzen, Kapazität)
 
+Bedienung:
+- Nach browser_navigate oder browser_click IMMER browser_snapshot aufrufen, um den Seiteninhalt zu sehen.
+- Auf Vergabeplattformen gibt es meist Reiter wie "Verfahrensangaben" und "Vergabeunterlagen".
+- Heruntergeladene Dateien findest du mit downloads_auflisten.
+
 Regeln:
 - Melde dich NIRGENDS an, registriere dich nicht, gib keine Firmendaten in Formulare ein und
   sende nichts ab. Wenn etwas nur mit Login geht, schreibe das in den Bericht.
@@ -90,12 +95,14 @@ def _doc_tools(downloads: Path):
     return [downloads_auflisten, zip_entpacken, dokument_lesen]
 
 
-async def _run(services: Services, system_prompt: str, task: str) -> str:
+async def _run(services: Services, system_prompt: str, task: str, uploads: bool = False) -> str:
     s = services.settings
+    blocked = {"browser_run_code_unsafe"} | (set() if uploads else {"browser_file_upload"})
     async with services.browser.lock:
+        browser_tools = [t for t in await services.browser.tools() if t.name not in blocked]
         agent = create_agent(
             chat_model(s, s.model_smart),
-            tools=[*await services.browser.tools(), *_doc_tools(s.downloads_dir)],
+            tools=[*browser_tools, *_doc_tools(s.downloads_dir)],
             system_prompt=system_prompt,
             middleware=[
                 # Browser-Snapshots sind groß: alte Tool-Ergebnisse aus dem Kontext räumen
@@ -130,6 +137,6 @@ async def gib_ab(services: Services, tender: dict, angebot: str) -> str:
         f"{tender_brief(tender)}\n\nFirmenprofil:\n{load_profile(services.settings)}\n\n"
         f"Freigegebenes Angebot:\n{angebot}\n\nVerfügbare Dateien:\n{files}"
     )
-    report = await _run(services, ABGABE_PROMPT, task)
+    report = await _run(services, ABGABE_PROMPT, task, uploads=True)
     _save(services, tender["id"], "abgabe.md", "Abgabeversuch", report)
     return report

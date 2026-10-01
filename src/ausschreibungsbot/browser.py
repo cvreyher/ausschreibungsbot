@@ -41,6 +41,8 @@ class Browser:
             str(s.downloads_dir.resolve()),
             "--viewport-size",
             "1280,900",
+            "--image-responses",
+            "omit",
         ]
         if s.playwright_headless:
             args.append("--headless")
